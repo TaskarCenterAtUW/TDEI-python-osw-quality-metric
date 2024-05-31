@@ -1,0 +1,3 @@
+fastapi
+python_ms_core
+pydantic_settings
