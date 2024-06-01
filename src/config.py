@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
-
+from src.calculators import QMFixedCalculator, QMRandomCalculator
 
 load_dotenv()
 
@@ -12,7 +12,11 @@ class Config(BaseSettings):
     incoming_topic_subscription: str = os.environ.get('QUALITY_REQ_SUB', '')
     outgoing_topic_name: str = os.environ.get('QUALITY_RES_TOPIC', '')
     storage_container_name: str = os.environ.get('CONTAINER_NAME', 'osw')
+    algorithm_dictionary: dict = {"fixed":QMFixedCalculator, "random":QMRandomCalculator}
 
     def get_download_folder(self) -> str:
-        root_dir = os.path.dirname(os.path.abspath(__file__))
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(root_dir, 'downloads')
+    def get_assets_folder(self) -> str:
+        root_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(root_dir, 'assets')
