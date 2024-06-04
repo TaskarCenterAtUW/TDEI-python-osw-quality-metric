@@ -79,6 +79,9 @@ class ServiceBusService:
         )
         self.send_response(response)
         # Process the message
+        # Clean up the download_folder
+        logging.info('Cleaning up download folder')
+        shutil.rmtree(download_folder)
         pass
 
     def send_response(self, msg: QueueMessage):
