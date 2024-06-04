@@ -1,0 +1,9 @@
+{
+    "messageType": "mettric-calculation",
+    "messageId": "message-id-from-msg",
+    "data": {
+      "jobId": "0b41ebc5-350c-42d3-90af-3af4ad3628fb",
+      "data_file": "https://tdeisamplestorage.blob.core.windows.net/osw/test_upload/Archive.zip",
+      "algorithms": "fixed"
+    }
+  }

@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from python_ms_core import Core
 from python_ms_core.core.queue.models.queue_message import QueueMessage
-
+from dataclasses import asdict
 from src.config import Config
 from src.services.storage_service import StorageService
 import logging
@@ -32,7 +32,7 @@ class ServiceBusService:
         self.outgoing_topic = core.get_topic(self.config.outgoing_topic_name)
         self.storage_service = StorageService(core)
         # Start listening to the things
-        self.incoming_topic.subscribe(self.config.input_sub, self.handle_message)
+        self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         pass
 
     def handle_message(self, msg: QueueMessage):
@@ -58,20 +58,24 @@ class ServiceBusService:
         os.makedirs(output_folder,exist_ok=True)
         output_file_local_path = os.path.join(output_folder,'qm-output.zip')
         qm_calculator = OswQmCalculator()
-        qm_calculator.calculate_quality_metric(download_path, quality_request.data.algorithms,output_file_local_path)
+        algorithm_names = quality_request.data.algorithms.split(',')
+        qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path)
         # Upload the file
         output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-output.zip'
         output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
+        logging.info(f'Uploaded file to {output_file_url}')
+
+        response_data = {
+            'status':'success',
+            'message':'Quality metrics calculated successfully',
+            'success':True,
+            'dataset_url':input_file_url,
+            'qm_dataset_url':output_file_url
+        }
         response = QualityMetricResponse(
             messageType=msg.messageType,
             messageId=msg.messageId,
-            data= ResponseData(
-                status='success',
-                message='Quality metrics calculated successfully',
-                success=True,
-                dataset_url=input_file_url,
-                qm_dataset_url=output_file_url
-            )
+            data=  response_data
         )
         self.send_response(response)
         # Process the message
@@ -79,7 +83,13 @@ class ServiceBusService:
 
     def send_response(self, msg: QueueMessage):
         logging.info(f"Sending response for message {msg.messageId}")
-        self.outgoing_topic.publish(msg)
+        # self.outgoing_topic.publish(msg)
+        queue_message = QueueMessage.data_from({
+            'messageId': msg.messageId,
+            'messageType': msg.messageType,
+            'data': asdict(msg.data)
+        })
+        self.outgoing_topic.publish(queue_message)
         pass
 
     
