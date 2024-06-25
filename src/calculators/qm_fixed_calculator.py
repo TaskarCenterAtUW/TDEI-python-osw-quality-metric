@@ -17,7 +17,7 @@ class QMRandomCalculator(QMCalculator):
         pass
     
     def calculate_quality_metric(self, feature: dict) -> float:
-        return random.randfloat(30, 100)
+        return random.uniform(30, 100)
 
     def qm_metric_tag(self) -> str:
         return "ext:qm:random"
