@@ -33,3 +33,6 @@ jobs:
         with:
           app-name: ${{secrets.AZURE_WEBAPP_NAME}}
           images: ${{ secrets.REGISTRY_DOMAIN }}/${{ secrets.REGISTRY_REPO }}:${{ github.sha }}
+
+          
+  
