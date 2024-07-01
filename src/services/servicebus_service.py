@@ -14,7 +14,7 @@ from src.models.quality_request import QualityRequest
 from src.models.quality_response import QualityMetricResponse, ResponseData
 from src.services.osw_qm_calculator_service import OswQmCalculator
 
-logging.basicConfig()
+logging.basicConfig(level=logging.INFO)
 
 
 class ServiceBusService:
@@ -61,7 +61,7 @@ class ServiceBusService:
         algorithm_names = quality_request.data.algorithms.split(',')
         qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path)
         # Upload the file
-        output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-output.zip'
+        output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
         output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
         logging.info(f'Uploaded file to {output_file_url}')
 
