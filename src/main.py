@@ -1,15 +1,28 @@
-from typing import Union
-from fastapi import FastAPI, Request
+import asyncio
 from fastapi.responses import Response
-from python_ms_core import Core
-
-
+from fastapi import FastAPI, Depends
+from functools import lru_cache
 from src.services.servicebus_service import ServiceBusService
-
-service_bus_instance = ServiceBusService()
-
+from src.config import Config
 
 app = FastAPI()
+
+
+@lru_cache()
+def get_settings():
+    return Config()
+
+
+def start_servicebus_service():
+    # Start the ServiceBusService (blocking call)
+    service = ServiceBusService()
+
+
+@app.on_event("startup")
+async def startup_event(settings: Config = Depends(get_settings)):
+    # Run the ServiceBusService in a background thread using asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, start_servicebus_service)
 
 
 class OctetStreamResponse(Response):
