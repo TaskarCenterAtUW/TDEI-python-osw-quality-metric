@@ -37,3 +37,8 @@ def root():
 @app.get('/ping')
 def ping():
     return {'msg': 'Ping Successful'}
+
+
+@app.get('/health')
+def ping():
+    return "I'm healthy !!"
