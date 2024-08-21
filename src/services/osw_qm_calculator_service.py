@@ -1,6 +1,5 @@
 import zipfile
 from src.config import Config
-from src.calculators import QMFixedCalculator
 import json
 import os
 import tempfile
@@ -8,6 +7,8 @@ import logging
 import time
 
 logging.basicConfig()
+logger = logging.getLogger("QualityMetricCalculator")
+logger.setLevel(logging.INFO)
 
 
 class OswQmCalculator:
@@ -41,19 +42,19 @@ class OswQmCalculator:
         with zipfile.ZipFile(input_file, 'r') as input_zip:
             input_unzip_folder = tempfile.TemporaryDirectory()
             file_list = self.extract_zip(input_zip, input_unzip_folder.name)
-        logging.info(f"Extracted input files: {file_list}")
+        logger.info(f"Extracted input files: {file_list}")
         input_files_path = [os.path.join(input_unzip_folder.name, file) for file in file_list]
         output_unzip_folder = tempfile.TemporaryDirectory()
-        logging.info(f"Started calculating quality metrics for input files: {input_files_path}")
+        logger.info(f"Started calculating quality metrics for input files: {input_files_path}")
         for input_file in input_files_path:
             qm_calculated_json = self.parse_and_calculate_quality_metric(input_file, algorithm_names)
             qm_calculated_file_path = os.path.join(output_unzip_folder.name, os.path.basename(input_file))
             with open(qm_calculated_file_path, 'w') as qm_file:
                 json.dump(qm_calculated_json, qm_file)
-        logging.info(f"Finished calculating quality metrics for input files: {input_files_path}")
-        logging.info(f'Zipping output files to {output_path}')
+        logger.info(f"Finished calculating quality metrics for input files: {input_files_path}")
+        logger.info(f'Zipping output files to {output_path}')
         self.zip_folder(output_unzip_folder.name, output_path)
-        logging.info(f'Cleaning up temporary folders.')
+        logger.info(f'Cleaning up temporary folders.')
         input_unzip_folder.cleanup()
         output_unzip_folder.cleanup()
 
@@ -109,7 +110,7 @@ class OswQmCalculator:
         algo_instances = []
         for algo_name in algorithm_names:
             if not algo_name in config.algorithm_dictionary:
-                logging.warning('Algorithm not found : ' + algo_name)
+                logger.warning('Algorithm not found : ' + algo_name)
             else:
                 algo_instances.append(config.algorithm_dictionary[algo_name]())
         with open(input_file, 'r') as input_file:
@@ -118,5 +119,5 @@ class OswQmCalculator:
                 for calculator in algo_instances:
                     feature[calculator.qm_metric_tag()] = calculator.calculate_quality_metric(feature)
         end_time = time.time()
-        logging.info(f"Time taken to calculate quality metrics for {input_file}: {end_time - start_time} seconds")
+        logger.info(f"Time taken to calculate quality metrics for {input_file}: {end_time - start_time} seconds")
         return input_json

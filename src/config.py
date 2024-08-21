@@ -13,6 +13,7 @@ class Config(BaseSettings):
     outgoing_topic_name: str = os.environ.get('QUALITY_RES_TOPIC', '')
     storage_container_name: str = os.environ.get('CONTAINER_NAME', 'osw')
     algorithm_dictionary: dict = {"fixed":QMFixedCalculator, "random":QMRandomCalculator}
+    max_concurrent_messages: int = os.environ.get('MAX_CONCURRENT_MESSAGES', 1)
 
     def get_download_folder(self) -> str:
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
