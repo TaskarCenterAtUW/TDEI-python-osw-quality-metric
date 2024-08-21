@@ -1,4 +1,3 @@
-import json
 import os.path
 import shutil
 import threading
@@ -15,6 +14,8 @@ from src.models.quality_response import QualityMetricResponse, ResponseData
 from src.services.osw_qm_calculator_service import OswQmCalculator
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("QualityMetricService")
+logger.setLevel(logging.INFO)
 
 
 class ServiceBusService:
@@ -27,21 +28,19 @@ class ServiceBusService:
 
     def __init__(self) -> None:
         self.config = Config()
-        core = Core()
-        self.incoming_topic = core.get_topic(self.config.incoming_topic_name)
-        self.outgoing_topic = core.get_topic(self.config.outgoing_topic_name)
-        self.storage_service = StorageService(core)
+        self.core = Core()
+        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name, max_concurrent_messages=self.config.max_concurrent_messages)
+        self.storage_service = StorageService(core=self.core)
         # Start listening to the things
         self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         pass
 
     def handle_message(self, msg: QueueMessage):
         # Logs and creates a thread for processing
-        process_thread = threading.Thread(target=self.process_message, args=[msg])
-        process_thread.start()
+        self.process_message(msg=msg)
 
     def process_message(self, msg: QueueMessage):
-        logging.info(f"Processing message {msg.messageId}")
+        logger.info(f"Processing message {msg.messageId}")
         # Parse the message
         quality_request = QualityRequest(messageType=msg.messageType,messageId=msg.messageId,data=msg.data)
         # Download the file
@@ -63,7 +62,7 @@ class ServiceBusService:
         # Upload the file
         output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
         output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
-        logging.info(f'Uploaded file to {output_file_url}')
+        logger.info(f'Uploaded file to {output_file_url}')
 
         response_data = {
             'status':'success',
@@ -75,24 +74,26 @@ class ServiceBusService:
         response = QualityMetricResponse(
             messageType=msg.messageType,
             messageId=msg.messageId,
-            data=  response_data
+            data=response_data
         )
         self.send_response(response)
         # Process the message
         # Clean up the download_folder
-        logging.info('Cleaning up download folder')
+        logger.info('Cleaning up download folder')
         shutil.rmtree(download_folder)
         pass
 
     def send_response(self, msg: QueueMessage):
-        logging.info(f"Sending response for message {msg.messageId}")
-        # self.outgoing_topic.publish(msg)
-        queue_message = QueueMessage.data_from({
-            'messageId': msg.messageId,
-            'messageType': msg.messageType,
-            'data': asdict(msg.data)
-        })
-        self.outgoing_topic.publish(queue_message)
+        try:
+            queue_message = QueueMessage.data_from({
+                'messageId': msg.messageId,
+                'messageType': msg.messageType,
+                'data': asdict(msg.data)
+            })
+            self.core.get_topic(topic_name=self.config.outgoing_topic_name).publish(data=queue_message)
+            logger.info(f"Publishing response for message {msg.messageId}")
+        except Exception as e:
+            logger.error(f'Failed to send response for message {msg.messageId} with error {e}')
         pass
 
     
