@@ -9,6 +9,7 @@ import osmnx as ox
 import dask_geopandas
 import geonetworkx as gnx
 from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
+from shapely.ops import voronoi_diagram
 from tqdm import tqdm
 import itertools
 import numpy as np
@@ -131,7 +132,59 @@ def qm_func(feature, gdf):
         return feature
 
 
-def calculate_xn_qm(osw_edge_file_path: str, xn_polygon_path: str, qm_file_path: str):
+def create_voronoi_diagram(G_roads_simplified, bounds):
+    # first thin the nodes 
+    gdf_roads_simplified = gnx.graph_edges_to_gdf(G_roads_simplified)
+    voronoi = voronoi_diagram(gdf_roads_simplified.boundary.unary_union, envelope = bounds)
+    voronoi_gdf = gpd.GeoDataFrame({"geometry": voronoi.geoms})
+    voronoi_gdf = voronoi_gdf.set_crs(gdf_roads_simplified.crs)
+    voronoi_gdf_clipped = gpd.clip(voronoi_gdf, bounds)
+    voronoi_gdf_clipped = voronoi_gdf_clipped.to_crs(PROJ)
+    
+    return voronoi_gdf_clipped
+
+
+def calculate_xn_qm(osw_edge_file_path: str, qm_file_path: str):
+    """
+    Calculate and save quality metric for given OSW edge data on intersetion define by the polygon file.
+
+    Parameters:
+    osw_edge_file_path (str): Path to the OSW edge file.
+    qm_file_path (str): Path where the output quality metric file will be saved.
+    """
+    try:
+        gdf = gpd.read_file(osw_edge_file_path)
+
+        unified_geom = gdf.unary_union
+        bounding_polygon = unified_geom.convex_hull
+
+        g_roads_simplified = ox.graph.graph_from_polygon(bounding_polygon, network_type = 'drive', simplify=True, retain_all=True)
+        tile_gdf = create_voronoi_diagram(g_roads_simplified, bounding_polygon)
+        tile_gdf = tile_gdf.to_crs(PROJ)
+        tile_gdf = tile_gdf[['geometry']]
+
+        gdf = gdf.to_crs(PROJ)
+
+        # compute local stats
+        df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=64)
+
+        # print('computing stats...')
+        output = df_dask.apply(qm_func, axis=1, meta=[
+            ('geometry', 'geometry'),
+            ('tra_score', 'object'),
+            ], gdf=gdf).compute(scheduler='multiprocessing')
+
+        output.to_file(qm_file_path, driver='GeoJSON')
+
+    except Exception as e:
+        print(f"Error {e} occurred when calculating qualiity metric for data {osw_edge_file_path}")
+        #traceback.print_exc()
+        return -1
+
+    return None
+
+
+def calculate_xn_qm_tm(osw_edge_file_path: str, xn_polygon_path: str, qm_file_path: str):
     """
     Calculate and save quality metric for given OSW edge data on intersetion define by the polygon file.
 
@@ -153,7 +206,7 @@ def calculate_xn_qm(osw_edge_file_path: str, xn_polygon_path: str, qm_file_path:
         # compute local stats
         df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=64)
 
-        print('computing stats...')
+        # print('computing stats...')
         output = df_dask.apply(qm_func, axis=1, meta=[
             ('geometry', 'geometry'),
             ('tra_score', 'object'),
@@ -163,7 +216,6 @@ def calculate_xn_qm(osw_edge_file_path: str, xn_polygon_path: str, qm_file_path:
     except Exception as e:
         print(f"Error {e} occurred when calculating qualiity metric for data {osw_edge_file_path} on {xn_polygon_path}")
         #traceback.print_exc()
-        stats["tra_score"] = -1
         return -1
 
     return None
@@ -171,7 +223,6 @@ def calculate_xn_qm(osw_edge_file_path: str, xn_polygon_path: str, qm_file_path:
 
 if __name__ == '__main__':
     osw_edge_file_path = sys.argv[1]
-    xn_polygon_path = sys.argv[2]
-    qm_file_path = sys.argv[3]
+    qm_file_path = sys.argv[2]
 
-    print(calculate_xn_qm(osw_edge_file_path, xn_polygon_path, qm_file_path))
+    print(calculate_xn_qm(osw_edge_file_path, qm_file_path))
