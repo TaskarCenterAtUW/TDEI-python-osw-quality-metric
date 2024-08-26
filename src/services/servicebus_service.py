@@ -11,6 +11,7 @@ import logging
 from src.models.quality_request import QualityRequest
 from src.models.quality_response import QualityMetricResponse, ResponseData
 from src.services.osw_qm_calculator_service import OswQmCalculator
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("QualityMetricService")
@@ -32,6 +33,11 @@ class ServiceBusService:
                                                   max_concurrent_messages=self.config.max_concurrent_messages)
         self.storage_service = StorageService(core=self.core)
         # Start listening to the things
+        self.listening_thread = threading.Thread(target=self.listen)
+        self.listening_thread.start()
+        pass
+    
+    def listen(self):
         self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         pass
 
@@ -115,6 +121,9 @@ class ServiceBusService:
         folder_path = '/'.join(folder_path)
         return folder_path
 
+    def stop(self):
+        self.listening_thread.join(timeout=0)
+        pass
     # def get_directory_path(self,remote_url:str)-> str:
     #     # https://tdeisamplestorage.blob.core.windows.net/osw/test_upload/500mb_file.zip
     #     # should give output test_upload
