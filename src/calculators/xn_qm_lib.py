@@ -2,15 +2,13 @@ import os
 os.environ['USE_PYGEOS'] = '0'
 import networkx as nx
 import sys
-import copy
 import traceback
 import geopandas as gpd
+import geonetworkx as gnx
 import osmnx as ox
 import dask_geopandas
-import geonetworkx as gnx
 from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
 from shapely.ops import voronoi_diagram
-from tqdm import tqdm
 import itertools
 import numpy as np
 import pandas as pd
