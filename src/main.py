@@ -6,24 +6,25 @@ from src.services.servicebus_service import ServiceBusService
 from src.config import Config
 
 app = FastAPI()
-
+app.qm_service = None
 
 @lru_cache()
 def get_settings():
     return Config()
 
 
-def start_servicebus_service():
-    # Start the ServiceBusService (blocking call)
-    service = ServiceBusService()
-
 
 @app.on_event("startup")
 async def startup_event(settings: Config = Depends(get_settings)):
     # Run the ServiceBusService in a background thread using asyncio
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, start_servicebus_service)
+    # loop = asyncio.get_event_loop()
+    # loop.run_in_executor(None, start_servicebus_service)
+    app.qm_service = ServiceBusService()
 
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    app.qm_service.stop()
 
 class OctetStreamResponse(Response):
     media_type = 'application/octet-stream'
