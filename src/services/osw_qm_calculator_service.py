@@ -89,7 +89,11 @@ class OswQmCalculator:
 
         """
         input_zip.extractall(unzip_folder)
-        input_files = [name for name in os.listdir(unzip_folder) if os.path.isfile(os.path.join(unzip_folder, name))]
+        # walk through and collect all files
+        input_files = []
+        for root, dirs, files in os.walk(unzip_folder):
+            for file in files:
+                input_files.append(os.path.join(root, file))
         return input_files
 
     def parse_and_calculate_quality_metric(self, input_file, algorithm_names):
