@@ -53,39 +53,32 @@ class ServiceBusService:
         input_file_url = quality_request.data.data_file
         parsed_url = urlparse(input_file_url)
         file_name = os.path.basename(parsed_url.path)
-        download_folder = os.path.join(self.config.get_download_folder(), msg.messageId)
-        os.makedirs(download_folder, exist_ok=True)
-        download_path = os.path.join(download_folder, file_name)
-        try:
-            self.storage_service.download_remote_file(input_file_url, download_path)
-            # Process the file
-            output_folder = os.path.join(download_folder, 'qm')
-            os.makedirs(output_folder, exist_ok=True)
-            output_file_local_path = os.path.join(output_folder, 'qm-output.zip')
-            qm_calculator = OswQmCalculator()
-            algorithm_names = quality_request.data.algorithms.split(',')
-            qm_calculator.calculate_quality_metric(download_path, algorithm_names, output_file_local_path)
-            # Upload the file
-            output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
-            output_file_url = self.storage_service.upload_local_file(output_file_local_path, output_file_remote_path)
-            logger.info(f'Uploaded file to {output_file_url}')
+        input_dir_path = parsed_url.path
+        download_folder = os.path.join(self.config.get_download_folder(),msg.messageId)
+        os.makedirs(download_folder,exist_ok=True)
+        download_path = os.path.join(download_folder,file_name)
+        self.storage_service.download_remote_file(input_file_url, download_path)
 
-            response_data = {
-                'status': 'success',
-                'message': 'Quality metrics calculated successfully',
-                'success': True,
-                'dataset_url': input_file_url,
-                'qm_dataset_url': output_file_url
-            }
-        except Exception as e:
-            logger.error(f'Failed to process message {msg.messageId} with error {e}')
-            response_data = {
-                'status': 'failed',
-                'message': f'Failed to process message {msg.messageId} with error {e}',
-                'success': False,
-                'dataset_url': input_file_url,
-                'qm_dataset_url': ''
-            }
+        # intersection file
+        ixn_file_url = quality_request.data.intersectionFile
+        ixn_file_path = None
+        if ixn_file_url:
+            ixn_file_name = os.path.basename(ixn_file_url)
+            ixn_file_path = os.path.join(download_folder,ixn_file_name)
+            self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
+            # quality_request.data.intersectionFile = ixn_file_path
+
+        # Process the file
+        output_folder = os.path.join(download_folder,'qm')
+        os.makedirs(output_folder,exist_ok=True)
+        output_file_local_path = os.path.join(output_folder,'qm-output.zip')
+        qm_calculator = OswQmCalculator()
+        algorithm_names = quality_request.data.algorithms.split(',')
+        qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
+        # Upload the file
+        output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
+        output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
+        logging.info(f'Uploaded file to {output_file_url}')
 
         response = QualityMetricResponse(
             messageType=msg.messageType,

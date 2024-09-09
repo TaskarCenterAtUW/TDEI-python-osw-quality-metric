@@ -1,5 +1,6 @@
 import zipfile
 from src.config import Config
+from src.calculators import QMIXNCalculator
 import json
 import os
 import tempfile
@@ -26,7 +27,7 @@ class OswQmCalculator:
 
     """
 
-    def calculate_quality_metric(self, input_file, algorithm_names, output_path):
+    def calculate_quality_metric(self, input_file, algorithm_names, output_path, ixn_file=None):
         """
         Calculates quality metrics for input files using specified algorithms.
 
@@ -47,7 +48,7 @@ class OswQmCalculator:
         output_unzip_folder = tempfile.TemporaryDirectory()
         logger.info(f"Started calculating quality metrics for input files: {input_files_path}")
         for input_file in input_files_path:
-            qm_calculated_json = self.parse_and_calculate_quality_metric(input_file, algorithm_names)
+            qm_calculated_json = self.parse_and_calculate_quality_metric(input_file, algorithm_names,ixn_file)
             qm_calculated_file_path = os.path.join(output_unzip_folder.name, os.path.basename(input_file))
             with open(qm_calculated_file_path, 'w') as qm_file:
                 json.dump(qm_calculated_json, qm_file)
@@ -96,7 +97,7 @@ class OswQmCalculator:
                 input_files.append(os.path.join(root, file))
         return input_files
 
-    def parse_and_calculate_quality_metric(self, input_file, algorithm_names):
+    def parse_and_calculate_quality_metric(self, input_file, algorithm_names, ixn_file=None):
         """
         Parses and calculates quality metrics for a specific input file.
 
@@ -122,6 +123,11 @@ class OswQmCalculator:
             for feature in input_json['features']:
                 for calculator in algo_instances:
                     feature[calculator.qm_metric_tag()] = calculator.calculate_quality_metric(feature)
+
+        if 'ixn' in algorithm_names:
+            ixn_calculator = QMIXNCalculator()
+            input_json = ixn_calculator.calculate_quality_metric(input_file, ixn_file)
+             
         end_time = time.time()
         logger.info(f"Time taken to calculate quality metrics for {input_file}: {end_time - start_time} seconds")
         return input_json
