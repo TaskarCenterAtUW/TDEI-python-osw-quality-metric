@@ -15,15 +15,22 @@ import pandas as pd
 
 
 class QMXNLibCalculator(QMCalculator):
-
     def __init__(self, edges_file_path:str, output_file_path:str, polygon_file_path:str=None):
+        """
+        Initializes the QMXNLibCalculator class.
+
+        Args:
+            edges_file_path (str): Path to the file containing the OSW edge data.
+            output_file_path (str): Path to where the output quality metric file will be saved.
+            polygon_file_path (str, optional): Path to the intersection polygon file. If not provided, will use the polygon computed from the convex hull of OSW edge data. Defaults to None.
+        """
         self.edges_file_path = edges_file_path
         self.output_file_path = output_file_path
         self.polygon_file_path = polygon_file_path
         warnings.filterwarnings("ignore")
         self.default_projection = 'epsg:26910'
+        self.output_projection = 'epsg:4326'
         self.precision = 1e-5
-        pass
 
     def add_edges_from_linestring(self, graph, linestring, edge_attrs):
         points = list(linestring.coords)
@@ -65,7 +72,7 @@ class QMXNLibCalculator(QMCalculator):
         return "QMXNLibCalculator"
 
     def tile_tra_score(self, G, polygon):
-        # assign each point t a polygon line
+        # assign each point to a polygon line
         pts_line_map = self.group_G_pts(G, polygon)
         boundary_nodes = [item for sublist in pts_line_map.values() for item in sublist]
 
@@ -128,6 +135,7 @@ class QMXNLibCalculator(QMCalculator):
     def calculate_quality_metric(self):
         try:
             gdf = gpd.read_file(self.edges_file_path)
+
             if self.polygon_file_path:
                  tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
@@ -146,8 +154,10 @@ class QMXNLibCalculator(QMCalculator):
                 ('geometry', 'geometry'),
                 ('tra_score', 'object')
             ], gdf=gdf).compute(scheduler='multiprocessing')
+            output = output.to_crs(self.output_projection) # The output should be in WGS84 (epsg:4326)
             output.to_file(self.output_file_path, driver='GeoJSON')
             return QualityMetricResult(success=True, message='QMXNLibCalculator', output_file=self.output_file_path)
+
         except Exception as e:
             print(f"Error {e} occurred when calculating quality metric for data {self.edges_file_path}")
             return QualityMetricResult(success=False, message=f'Error: {e}', output_file="")
