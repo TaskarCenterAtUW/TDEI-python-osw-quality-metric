@@ -1,5 +1,5 @@
 import os
-os.environ['USE_PYGEOS'] = '0'
+os.environ['USE_PYGEOS'] = '0' # Got to move it somewhere else
 import networkx as nx
 import sys
 import traceback
