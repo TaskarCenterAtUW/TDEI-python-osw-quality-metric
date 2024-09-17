@@ -1,11 +1,13 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
 class RequestData:
     jobId: str
     data_file: str
-    algorithms: str
+    algorithm: str
+    sub_regions_file: Optional[str] = None
 
 
 @dataclass
