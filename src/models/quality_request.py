@@ -6,8 +6,8 @@ from typing import Optional
 class RequestData:
     jobId: str
     data_file: str
-    algorithms: str
-    intersectionFile: Optional[str] = None
+    algorithm: str
+    sub_regions_file: Optional[str] = None
 
 
 @dataclass

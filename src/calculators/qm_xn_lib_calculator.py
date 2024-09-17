@@ -1,4 +1,4 @@
-from qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
 import geopandas as gpd
 import sys
 import warnings
@@ -6,7 +6,7 @@ import networkx as nx
 import traceback
 import geonetworkx as gnx
 import osmnx as ox
-import dask_geopandas
+import dask_geopandas 
 from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
 from shapely.ops import voronoi_diagram
 import itertools

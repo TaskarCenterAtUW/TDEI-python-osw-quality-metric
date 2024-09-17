@@ -1,4 +1,4 @@
-from qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
 import random
 import geopandas as gpd
 import sys

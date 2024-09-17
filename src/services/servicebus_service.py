@@ -28,68 +28,89 @@ class ServiceBusService:
 
     def __init__(self) -> None:
         self.config = Config()
-        self.core = Core()
-        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name,
-                                                  max_concurrent_messages=self.config.max_concurrent_messages)
-        self.storage_service = StorageService(core=self.core)
+        core = Core()
+        self.incoming_topic = core.get_topic(self.config.incoming_topic_name)
+        self.outgoing_topic = core.get_topic(self.config.outgoing_topic_name)
+        self.storage_service = StorageService(core)
+        self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message])
         # Start listening to the things
-        self.listening_thread = threading.Thread(target=self.listen)
+        # self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         self.listening_thread.start()
         pass
-    
-    def listen(self):
-        self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
-        pass
 
-    def handle_message(self, msg: QueueMessage):
-        # Logs and creates a thread for processing
-        self.process_message(msg=msg)
+    # def handle_message(self, msg: QueueMessage):
+    #     # Logs and creates a thread for processing
+    #     process_thread = threading.Thread(target=self.process_message, args=[msg])
+    #     process_thread.start()
 
     def process_message(self, msg: QueueMessage):
-        logger.info(f"Processing message {msg.messageId}")
-        # Parse the message
-        quality_request = QualityRequest(messageType=msg.messageType, messageId=msg.messageId, data=msg.data)
-        # Download the file
-        input_file_url = quality_request.data.data_file
-        parsed_url = urlparse(input_file_url)
-        file_name = os.path.basename(parsed_url.path)
-        input_dir_path = parsed_url.path
-        download_folder = os.path.join(self.config.get_download_folder(),msg.messageId)
-        os.makedirs(download_folder,exist_ok=True)
-        download_path = os.path.join(download_folder,file_name)
-        self.storage_service.download_remote_file(input_file_url, download_path)
+        try:
+            logging.info(f"Processing message {msg.messageId}")
+            # Parse the message
+            quality_request = QualityRequest(messageType=msg.messageType,messageId=msg.messageId,data=msg.data)
+            # Download the file
+            input_file_url = quality_request.data.data_file
+            parsed_url = urlparse(input_file_url)
+            file_name = os.path.basename(parsed_url.path)
+            input_dir_path = parsed_url.path
+            download_folder = os.path.join(self.config.get_download_folder(),msg.messageId)
+            os.makedirs(download_folder,exist_ok=True)
+            download_path = os.path.join(download_folder,file_name)
+            self.storage_service.download_remote_file(input_file_url, download_path)
 
-        # intersection file
-        ixn_file_url = quality_request.data.intersectionFile
-        ixn_file_path = None
-        if ixn_file_url:
-            ixn_file_name = os.path.basename(ixn_file_url)
-            ixn_file_path = os.path.join(download_folder,ixn_file_name)
-            self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
-            # quality_request.data.intersectionFile = ixn_file_path
+            # intersection file
+            ixn_file_url = quality_request.data.sub_regions_file
+            ixn_file_path = None
+            if ixn_file_url or ixn_file_url != '':
+                ixn_file_name = os.path.basename(ixn_file_url)
+                ixn_file_path = os.path.join(download_folder,ixn_file_name)
+                self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
+                # quality_request.data.intersectionFile = ixn_file_path
 
-        # Process the file
-        output_folder = os.path.join(download_folder,'qm')
-        os.makedirs(output_folder,exist_ok=True)
-        output_file_local_path = os.path.join(output_folder,'qm-output.zip')
-        qm_calculator = OswQmCalculator()
-        algorithm_names = quality_request.data.algorithms.split(',')
-        qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
-        # Upload the file
-        output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
-        output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
-        logging.info(f'Uploaded file to {output_file_url}')
+            # Process the file
+            output_folder = os.path.join(download_folder,'qm')
+            os.makedirs(output_folder,exist_ok=True)
+            output_file_local_path = os.path.join(output_folder,'qm-output.zip')
+            qm_calculator = OswQmCalculator()
+            algorithm_names = quality_request.data.algorithm.split(',')
+            qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
+            # Upload the file
+            output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
+            output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
+            logging.info(f'Uploaded file to {output_file_url}')
 
-        response = QualityMetricResponse(
-            messageType=msg.messageType,
-            messageId=msg.messageId,
-            data=response_data
-        )
-        self.send_response(msg=response)
-        # Process the message
-        # Clean up the download_folder
-        logger.info('Cleaning up download folder')
-        shutil.rmtree(download_folder)
+            response_data = {
+                'status':'success',
+                'message':'Quality metrics calculated successfully',
+                'success':True,
+                'dataset_url':input_file_url,
+                'qm_dataset_url':output_file_url
+            }
+            response = QualityMetricResponse(
+                messageType=msg.messageType,
+                messageId=msg.messageId,
+                data=  response_data
+            )
+            self.send_response(response)
+            # Process the message
+            # Clean up the download_folder
+            logging.info('Cleaning up download folder')
+            shutil.rmtree(download_folder)
+        except Exception as e:
+            logging.error(f'Error processing message {msg.messageId} : {e}')
+            response_data = {
+                'status':'failed',
+                'message':str(e),
+                'success':False,
+                'dataset_url':input_file_url,
+                'qm_dataset_url':None
+            }
+            response = QualityMetricResponse(
+                messageType=msg.messageType,
+                messageId=msg.messageId,
+                data=  response_data
+            )
+            self.send_response(response)
         pass
 
     def send_response(self, msg: QueueMessage):
