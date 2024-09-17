@@ -47,7 +47,7 @@ class OswQmCalculator:
             # logging.info(f"Extracted input files: {file_list}")
             # input_files_path = [os.path.join(input_unzip_folder.name, file) for file in file_list]
             output_unzip_folder = tempfile.TemporaryDirectory()
-            logging.info(f"Started calculating quality metrics for input files: {input_files_path}")
+            logger.info(f"Started calculating quality metrics for input files: {input_files_path}")
             # Get only the edges file out of the input files
             edges_file_path = [file_path for file_path in input_files_path if 'edges' in file_path]
             if len(edges_file_path) == 0:
@@ -58,7 +58,10 @@ class OswQmCalculator:
             for algorithm_name in algorithm_names:
                 qm_edges_output_path = os.path.join(output_unzip_folder.name, f'{algorithm_name}_{edges_file_without_extension}.geojson')
                 qm_calculator = self.get_osw_qm_calculator(algorithm_name, ixn_file, edges_file_path, qm_edges_output_path)
+                start_time = time.time()
                 qm_calculator.calculate_quality_metric()
+                end_time = time.time()
+                logger.info(f"Time taken to calculate quality metrics for {algorithm_name}: {end_time - start_time} seconds")
             # Copy the rest of the files from input to output
             for file_path in input_files_path:
                 if 'edges' in file_path:
@@ -67,10 +70,10 @@ class OswQmCalculator:
                 output_file_path = os.path.join(output_unzip_folder.name, file_basename)
                 os.rename(file_path, output_file_path)
 
-            logging.info(f"Finished calculating quality metrics for input files: {input_files_path}")
-            logging.info(f'Zipping output files to {output_path}')
+            logger.info(f"Finished calculating quality metrics for input files: {input_files_path}")
+            logger.info(f'Zipping output files to {output_path}')
             self.zip_folder(output_unzip_folder.name, output_path)
-            logging.info(f'Cleaning up temporary folders.')
+            logger.info(f'Cleaning up temporary folders.')
             input_unzip_folder.cleanup()
             output_unzip_folder.cleanup()
         except Exception as e:
