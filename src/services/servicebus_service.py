@@ -28,10 +28,10 @@ class ServiceBusService:
 
     def __init__(self) -> None:
         self.config = Config()
-        core = Core()
-        self.incoming_topic = core.get_topic(self.config.incoming_topic_name)
-        self.outgoing_topic = core.get_topic(self.config.outgoing_topic_name)
-        self.storage_service = StorageService(core)
+        self.core = Core()
+        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name)
+        self.outgoing_topic = self.core.get_topic(self.config.outgoing_topic_name)
+        self.storage_service = StorageService(self.core)
         self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message])
         # Start listening to the things
         # self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
@@ -44,8 +44,9 @@ class ServiceBusService:
     #     process_thread.start()
 
     def process_message(self, msg: QueueMessage):
+        logger.info(f"Processing message {msg}")
         try:
-            logging.info(f"Processing message {msg.messageId}")
+            logger.info(f"Processing message {msg.messageId}")
             # Parse the message
             quality_request = QualityRequest(messageType=msg.messageType,messageId=msg.messageId,data=msg.data)
             # Download the file
@@ -57,11 +58,12 @@ class ServiceBusService:
             os.makedirs(download_folder,exist_ok=True)
             download_path = os.path.join(download_folder,file_name)
             self.storage_service.download_remote_file(input_file_url, download_path)
-
+            logger.info(f'Downloaded file to {download_path}')
             # intersection file
             ixn_file_url = quality_request.data.sub_regions_file
             ixn_file_path = None
-            if ixn_file_url or ixn_file_url != '':
+            if ixn_file_url is not None:
+                logger.info(f'Downloading intersection file {ixn_file_url}')
                 ixn_file_name = os.path.basename(ixn_file_url)
                 ixn_file_path = os.path.join(download_folder,ixn_file_name)
                 self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
@@ -77,7 +79,7 @@ class ServiceBusService:
             # Upload the file
             output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
             output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
-            logging.info(f'Uploaded file to {output_file_url}')
+            logger.info(f'Uploaded file to {output_file_url}')
 
             response_data = {
                 'status':'success',
@@ -94,10 +96,10 @@ class ServiceBusService:
             self.send_response(response)
             # Process the message
             # Clean up the download_folder
-            logging.info('Cleaning up download folder')
+            logger.info('Cleaning up download folder')
             shutil.rmtree(download_folder)
         except Exception as e:
-            logging.error(f'Error processing message {msg.messageId} : {e}')
+            logger.error(f'Error processing message {msg.messageId} : {e}')
             response_data = {
                 'status':'failed',
                 'message':str(e),
