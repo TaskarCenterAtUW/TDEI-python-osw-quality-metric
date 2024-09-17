@@ -5,7 +5,7 @@ uvicorn~=0.30.6
 networkx==3.2.1
 geopandas==0.12.2
 osmnx==1.6.0
-dask==2024.2.1
+dask==2024.5.2
 dask-geopandas==0.3.1
 geonetworkx==0.5.3
 shapely==2.0.1
