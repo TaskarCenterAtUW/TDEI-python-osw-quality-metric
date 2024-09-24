@@ -56,19 +56,20 @@ class OswQmCalculator:
             edges_file_basename = os.path.basename(edges_file_path)
             edges_file_without_extension = os.path.splitext(edges_file_basename)[0]
             for algorithm_name in algorithm_names:
-                qm_edges_output_path = os.path.join(output_unzip_folder.name, f'{algorithm_name}_{edges_file_without_extension}.geojson')
+                qm_edges_output_path = os.path.join(output_unzip_folder.name, f'{algorithm_name}_qm.geojson')
                 qm_calculator = self.get_osw_qm_calculator(algorithm_name, ixn_file, edges_file_path, qm_edges_output_path)
                 start_time = time.time()
                 qm_calculator.calculate_quality_metric()
                 end_time = time.time()
                 logger.info(f"Time taken to calculate quality metrics for {algorithm_name}: {end_time - start_time} seconds")
             # Copy the rest of the files from input to output
-            for file_path in input_files_path:
-                if 'edges' in file_path:
-                    continue
-                file_basename = os.path.basename(file_path)
-                output_file_path = os.path.join(output_unzip_folder.name, file_basename)
-                os.rename(file_path, output_file_path)
+            # Dont copy the other files here.
+            # for file_path in input_files_path:
+            #     if 'edges' in file_path:
+            #         continue
+            #     file_basename = os.path.basename(file_path)
+            #     output_file_path = os.path.join(output_unzip_folder.name, file_basename)
+            #     os.rename(file_path, output_file_path)
 
             logger.info(f"Finished calculating quality metrics for input files: {input_files_path}")
             logger.info(f'Zipping output files to {output_path}')
