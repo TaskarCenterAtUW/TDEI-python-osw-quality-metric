@@ -12,6 +12,7 @@ from shapely.ops import voronoi_diagram
 import itertools
 import numpy as np
 import pandas as pd
+import os
 
 
 class QMXNLibCalculator(QMCalculator):
