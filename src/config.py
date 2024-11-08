@@ -14,6 +14,7 @@ class Config(BaseSettings):
     storage_container_name: str = os.environ.get('CONTAINER_NAME', 'osw')
     algorithm_dictionary: dict = {"fixed":QMFixedCalculator,"ixn":QMXNLibCalculator}
     max_concurrent_messages: int = os.environ.get('MAX_CONCURRENT_MESSAGES', 1)
+    partition_count:int = os.environ.get('PARTITION_COUNT', 2)
 
     def get_download_folder(self) -> str:
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

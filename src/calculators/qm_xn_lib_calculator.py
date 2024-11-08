@@ -15,7 +15,7 @@ import pandas as pd
 
 
 class QMXNLibCalculator(QMCalculator):
-    def __init__(self, edges_file_path:str, output_file_path:str, polygon_file_path:str=None):
+    def __init__(self, edges_file_path:str, output_file_path:str, polygon_file_path:str=None, partition_count:int = os.cpu_count()):
         """
         Initializes the QMXNLibCalculator class.
 
@@ -31,6 +31,7 @@ class QMXNLibCalculator(QMCalculator):
         self.default_projection = 'epsg:26910'
         self.output_projection = 'epsg:4326'
         self.precision = 1e-5
+        self.partition_count = partition_count
 
     def add_edges_from_linestring(self, graph, linestring, edge_attrs):
         points = list(linestring.coords)
@@ -147,7 +148,7 @@ class QMXNLibCalculator(QMCalculator):
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
-            no_of_cores = os.cpu_count()
+            no_of_cores = min(self.partition_count, os.cpu_count())
             df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=no_of_cores)
 
             output = df_dask.apply(self.qm_func,axis=1, meta=[
