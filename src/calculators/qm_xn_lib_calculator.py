@@ -147,8 +147,8 @@ class QMXNLibCalculator(QMCalculator):
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
-
-            df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=64)
+            no_of_cores = os.cpu_count()
+            df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=no_of_cores)
 
             output = df_dask.apply(self.qm_func,axis=1, meta=[
                 ('geometry', 'geometry'),
