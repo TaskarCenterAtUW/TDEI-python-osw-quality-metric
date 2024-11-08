@@ -27,6 +27,16 @@ class OswQmCalculator:
 
     """
 
+    def __init__(self, cores_to_use:int):
+        """
+        Initializes the OswQmCalculator class.
+
+        Args:
+            cores_to_use (int): The number of cores to use for calculating quality metrics.
+
+        """
+        self.cores_to_use = cores_to_use
+
     def calculate_quality_metric(self, input_file, algorithm_names, output_path, ixn_file=None):
         """
         Calculates quality metrics for input files using specified algorithms.
@@ -93,7 +103,7 @@ class OswQmCalculator:
 
         """
         if algorithm_name == 'ixn':
-            return QMXNLibCalculator(edges_file, output_file, ixn_file)
+            return QMXNLibCalculator(edges_file, output_file, ixn_file, self.cores_to_use)
         else:
             return QMFixedCalculator(edges_file, output_file)
 
@@ -164,7 +174,6 @@ class OswQmCalculator:
 
         if 'ixn' in algorithm_names:
             # get the edges file from the input
-
             ixn_calculator = QMXNLibCalculator()
             input_json = ixn_calculator.calculate_quality_metric(input_file, ixn_file)
              
