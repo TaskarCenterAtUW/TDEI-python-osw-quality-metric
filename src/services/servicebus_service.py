@@ -29,7 +29,7 @@ class ServiceBusService:
     def __init__(self) -> None:
         self.config = Config()
         self.core = Core()
-        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name)
+        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name, self.config.max_concurrent_messages)
         self.outgoing_topic = self.core.get_topic(self.config.outgoing_topic_name)
         self.storage_service = StorageService(self.core)
         self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message])
