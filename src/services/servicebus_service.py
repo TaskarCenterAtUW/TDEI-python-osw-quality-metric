@@ -29,7 +29,7 @@ class ServiceBusService:
     def __init__(self) -> None:
         self.config = Config()
         self.core = Core()
-        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name)
+        self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name, self.config.max_concurrent_messages)
         self.outgoing_topic = self.core.get_topic(self.config.outgoing_topic_name)
         self.storage_service = StorageService(self.core)
         self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message])
@@ -73,7 +73,8 @@ class ServiceBusService:
             output_folder = os.path.join(download_folder,'qm')
             os.makedirs(output_folder,exist_ok=True)
             output_file_local_path = os.path.join(output_folder,'qm-output.zip')
-            qm_calculator = OswQmCalculator()
+            cores_to_use = self.config.partition_count
+            qm_calculator = OswQmCalculator(cores_to_use=cores_to_use)
             algorithm_names = quality_request.data.algorithm.split(',')
             qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
             # Upload the file
