@@ -170,7 +170,8 @@ def calculate_xn_qm(osw_edge_file_path: str, qm_file_path: str, xn_polygon_path:
         tile_gdf = tile_gdf[['geometry']]
 
         # Compute local stats using dask-geopandas
-        df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=64)
+        no_of_cores = os.cpu_count()
+        df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=no_of_cores)
 
         # print('computing stats...')
         output = df_dask.apply(qm_func, axis=1, meta=[
