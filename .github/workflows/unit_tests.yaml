@@ -47,17 +47,17 @@ jobs:
 
     - name: Run tests with coverage
       run: |
-        dynamic_results_path="test_results/${{ env.output_folder }}"
-        mkdir -p $dynamic_results_path
+        timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
+        mkdir -p test_results
         PYTHONPATH=$(pwd) python -m coverage run --source=src -m unittest discover -v tests/
-        coverage report > $dynamic_results_path/latest_report.log
-        coverage report >> $dynamic_results_path/$(date '+%Y-%m-%d_%H-%M-%S')_report.log  
+        coverage report > test_results/${{ env.output_folder }}_latest_report.log
+        coverage report >> test_results/${{ env.output_folder }}_${timestamp}_report.log
 
     - name: Upload report to Azure
       uses: LanceMcCarthy/Action-AzureBlobUpload@v2
       with:
-        source_folder: 'test_results/${{ env.output_folder }}'
-        destination_folder: '${{ env.output_folder }}/unit_test_results'
+        source_folder: 'test_results'
+        destination_folder: '${{ env.output_folder }}'
         connection_string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
         container_name: 'osw-quality-metric-service'
         clean_destination_folder: false
