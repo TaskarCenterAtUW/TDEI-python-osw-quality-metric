@@ -28,14 +28,20 @@ jobs:
     - name: Determine output folder
       id: set_output_folder
       run: |
-        if [[ $GITHUB_REF_NAME == "main" ]]; then
+        if [[ $GITHUB_EVENT_NAME == "pull_request" ]]; then
+          branch_name=$GITHUB_BASE_REF
+        else
+          branch_name=$GITHUB_REF_NAME
+        fi
+
+        if [[ $branch_name == "main" ]]; then
           echo "output_folder=prod" >> $GITHUB_ENV
-        elif [[ $GITHUB_REF_NAME == "stage" ]]; then
+        elif [[ $branch_name == "stage" ]]; then
           echo "output_folder=stage" >> $GITHUB_ENV
-        elif [[ $GITHUB_REF_NAME == "dev" ]]; then
+        elif [[ $branch_name == "dev" ]]; then
           echo "output_folder=dev" >> $GITHUB_ENV
         else
-          echo "Unknown branch: $GITHUB_REF_NAME"
+          echo "Unknown branch: $branch_name"
           exit 1
         fi
 
@@ -53,6 +59,6 @@ jobs:
         source_folder: 'test_results/${{ env.output_folder }}'
         destination_folder: 'osw-quality-metric-service/${{ env.output_folder }}/${{ github.repository }}/unit_test_results'
         connection_string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-        container_name: 'reports'
+        container_name: 'tdeiinternal'
         clean_destination_folder: false
         delete_if_exists: false
