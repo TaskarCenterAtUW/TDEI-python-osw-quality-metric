@@ -49,9 +49,11 @@ jobs:
       run: |
         timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
         mkdir -p test_results
-        PYTHONPATH=$(pwd) python -m coverage run --source=src -m unittest discover -v tests/
-        coverage report > test_results/${{ env.output_folder }}_latest_report.log
-        coverage report >> test_results/${{ env.output_folder }}_${timestamp}_report.log
+        log_file="test_results/${{ env.output_folder }}_${timestamp}_report.log"
+        # Run the tests and append output to the log file
+        PYTHONPATH=$(pwd) python -m coverage run --source=src -m unittest discover -v tests/ >> $log_file 2>&1
+        # Append the coverage summary to the log file
+        coverage report >> $log_file
 
     - name: Upload report to Azure
       uses: LanceMcCarthy/Action-AzureBlobUpload@v2
