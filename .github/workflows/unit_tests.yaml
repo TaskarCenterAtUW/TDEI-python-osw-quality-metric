@@ -57,8 +57,8 @@ jobs:
       uses: LanceMcCarthy/Action-AzureBlobUpload@v2
       with:
         source_folder: 'test_results/${{ env.output_folder }}'
-        destination_folder: 'osw-quality-metric-service/${{ env.output_folder }}/${{ github.repository }}/unit_test_results'
+        destination_folder: '${{ env.output_folder }}/unit_test_results'
         connection_string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-        container_name: 'tdeiinternal'
+        container_name: 'osw-quality-metric-service'
         clean_destination_folder: false
         delete_if_exists: false
