@@ -11,9 +11,6 @@ jobs:
   UnitTest:
     runs-on: ubuntu-latest
 
-    env:
-      DATABASE_NAME: test_database
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v2
@@ -40,6 +37,7 @@ jobs:
         else
           echo "Unknown branch: $GITHUB_REF_NAME"
           exit 1
+        fi
 
     - name: Run tests with coverage
       run: |
