@@ -45,6 +45,7 @@ class ServiceBusService:
 
     def process_message(self, msg: QueueMessage):
         logger.info(f"Processing message {msg}")
+        input_file_url = None
         try:
             logger.info(f"Processing message {msg.messageId}")
             # Parse the message
