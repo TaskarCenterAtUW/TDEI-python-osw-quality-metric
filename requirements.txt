@@ -1,5 +1,7 @@
+--extra-index-url https://test.pypi.org/simple/
+
 fastapi~=0.112.1
-python_ms_core~=0.0.22
+python_ms_core~=0.0.24
 pydantic_settings~=2.4.0
 uvicorn~=0.30.6
 networkx==3.2.1
