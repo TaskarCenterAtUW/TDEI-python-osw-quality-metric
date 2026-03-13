@@ -1,5 +1,6 @@
 import os.path
 import shutil
+import signal
 from urllib.parse import urlparse
 
 from python_ms_core import Core
@@ -99,8 +100,6 @@ class ServiceBusService:
             self.send_response(response)
             # Process the message
             # Clean up the download_folder
-            logger.info('Cleaning up download folder')
-            shutil.rmtree(download_folder)
         except Exception as e:
             logger.error(f'Error processing message {msg.messageId} : {e}')
             response_data = {
@@ -117,7 +116,7 @@ class ServiceBusService:
             )
             self.send_response(response)
         finally:
-            self._stop_server_and_container()
+            self._stop_server_and_container(delay_seconds=5)
 
     def send_response(self, msg: QueueMessage):
         try:
@@ -142,6 +141,7 @@ class ServiceBusService:
         return folder_path
 
     def stop(self):
+        self._stop_server_and_container()
         self.listening_thread.join(timeout=0)
         pass
     # def get_directory_path(self,remote_url:str)-> str:
