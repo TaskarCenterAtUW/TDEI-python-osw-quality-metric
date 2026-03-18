@@ -1,5 +1,6 @@
 import os.path
 import shutil
+import time
 import signal
 from urllib.parse import urlparse
 
@@ -34,7 +35,7 @@ class ServiceBusService:
         self.outgoing_topic = self.core.get_topic(self.config.outgoing_topic_name)
         self.storage_service = StorageService(self.core)
         self._shutdown_triggered = threading.Event()
-        self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message,self.config.max_receivable_messages])
+        self.listening_thread = threading.Thread(target=self.start_listening)
         # Start listening to the things
         # self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         self.listening_thread.start()
@@ -44,6 +45,16 @@ class ServiceBusService:
     #     # Logs and creates a thread for processing
     #     process_thread = threading.Thread(target=self.process_message, args=[msg])
     #     process_thread.start()
+
+    def start_listening(self):
+        self.incoming_topic.subscribe(
+            self.config.incoming_topic_subscription,
+            self.process_message,
+            self.config.max_receivable_messages,
+        )
+        if self.config.max_receivable_messages > 0:
+            logger.info('Listener finished processing available messages; stopping server/container.')
+            self._stop_server_and_container(delay_seconds=5)
 
     def process_message(self, msg: QueueMessage):
         logger.info(f"Processing message {msg}")
@@ -115,8 +126,6 @@ class ServiceBusService:
                 data=  response_data
             )
             self.send_response(response)
-        finally:
-            self._stop_server_and_container(delay_seconds=5)
 
     def send_response(self, msg: QueueMessage):
         try:
