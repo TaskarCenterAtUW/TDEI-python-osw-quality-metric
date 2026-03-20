@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 jobs:
-    Build:
+  Build:
     environment: Development
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
