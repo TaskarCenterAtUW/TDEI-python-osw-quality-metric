@@ -27,35 +27,42 @@ jobs:
 
       - name: Determine output folder
         id: set_output_folder
+        shell: bash
         run: |
-          if [[ $GITHUB_EVENT_NAME == "pull_request" ]]; then
-            branch_name=$GITHUB_BASE_REF
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            branch_name="$GITHUB_BASE_REF"
           else
-            branch_name=$GITHUB_REF_NAME
+            branch_name="$GITHUB_REF_NAME"
           fi
-          
-          if [[ $branch_name == "main" ]]; then
-            echo "output_folder=prod" >> $GITHUB_ENV
-          elif [[ $branch_name == "stage" ]]; then
-            echo "output_folder=stage" >> $GITHUB_ENV
-          elif [[ $branch_name == "dev" ]]; then
-            echo "output_folder=dev" >> $GITHUB_ENV
-          else
-            echo "Unknown branch: $branch_name"
-            exit 1
-          fi
+
+          case "$branch_name" in
+            main)  echo "output_folder=prod"  >> "$GITHUB_ENV" ;;
+            stage) echo "output_folder=stage" >> "$GITHUB_ENV" ;;
+            dev)   echo "output_folder=dev"   >> "$GITHUB_ENV" ;;
+            *) echo "Unknown branch: $branch_name"; exit 1 ;;
+          esac
 
       - name: Run tests with coverage
         run: |
-          timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
+          set -o pipefail
+          timestamp="$(date '+%Y-%m-%d_%H-%M-%S')"
           mkdir -p test_results
           log_file="test_results/${timestamp}_report.log"
-          echo -e "\nTest Cases Report Report\n" >> $log_file
-          # Run the tests and append output to the log file
-          PYTHONPATH=$(pwd) python -m coverage run --source=src -m unittest discover -v tests/ >> $log_file 2>&1
-          echo -e "\nCoverage Report\n" >> $log_file
-          coverage report >> $log_file
-          coverage xml  
+
+          {
+            echo
+            echo "Test Cases Report"
+            echo
+          } | tee -a "$log_file"
+
+          # Run unittest in verbose mode; mirror output to console and file
+          python -m coverage run --source=src -m unittest discover -s tests/ -v 2>&1 | tee -a "$log_file"
+          test_status=${PIPESTATUS[0]}
+
+          echo -e "\nCoverage Report\n" | tee -a "$log_file"
+          coverage report 2>&1 | tee -a "$log_file"
+
+          exit $test_status 
 
       - name: Check coverage
         run: |

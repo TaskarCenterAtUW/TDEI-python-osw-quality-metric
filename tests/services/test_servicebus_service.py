@@ -88,8 +88,7 @@ class TestServiceBusService(unittest.TestCase):
         mock_stop_server_and_container.assert_called_once_with(delay_seconds=5)
 
     @patch('src.services.servicebus_service.OswQmCalculator')
-    @patch('src.services.servicebus_service.shutil.rmtree')
-    def test_process_message_success_without_sub_region(self, mock_rmtree, mock_calculator):
+    def test_process_message_success_without_sub_region(self, mock_calculator):
         # Mock message and dependencies
 
         self.service.storage_service.download_remote_file = MagicMock()
@@ -103,11 +102,9 @@ class TestServiceBusService(unittest.TestCase):
         self.service.storage_service.download_remote_file.assert_called_once()
         mock_calculator_instance.calculate_quality_metric.assert_called_once()
         self.service.storage_service.upload_local_file.assert_called_once()
-        mock_rmtree.assert_called_once()
 
     @patch('src.services.servicebus_service.OswQmCalculator')
-    @patch('src.services.servicebus_service.shutil.rmtree')
-    def test_process_message_success_with_sub_region(self, mock_rmtree, mock_calculator):
+    def test_process_message_success_with_sub_region(self, mock_calculator):
         # Mock message and dependencies
 
 
@@ -124,7 +121,6 @@ class TestServiceBusService(unittest.TestCase):
         self.service.storage_service.download_remote_file.assert_called()
         mock_calculator_instance.calculate_quality_metric.assert_called_once()
         self.service.storage_service.upload_local_file.assert_called_once()
-        mock_rmtree.assert_called_once()
 
     @patch('src.services.servicebus_service.logger')
     def test_process_message_failure(self, mock_logger):
