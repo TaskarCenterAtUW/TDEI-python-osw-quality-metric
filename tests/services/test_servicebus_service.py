@@ -16,6 +16,7 @@ class TestServiceBusService(unittest.TestCase):
         mock_config.return_value.outgoing_topic_name = 'mock-outgoing-topic'
         mock_config.return_value.max_concurrent_messages = 5
         mock_config.return_value.incoming_topic_subscription = 'mock-subscription'
+        mock_config.return_value.max_receivable_messages = -1
 
         # Mock Core
         mock_core.return_value.get_topic.return_value = MagicMock()
@@ -52,9 +53,42 @@ class TestServiceBusService(unittest.TestCase):
         self.assertIsInstance(self.service.config, MagicMock)
         self.assertIsInstance(self.service.storage_service, MagicMock)
 
+    @patch('src.services.servicebus_service.threading.Thread.start')
+    @patch.object(ServiceBusService, '_stop_server_and_container')
+    @patch('src.services.servicebus_service.Config')
+    @patch('src.services.servicebus_service.Core')
+    def test_start_listening_stops_container_after_subscribe_returns(
+        self,
+        mock_core,
+        mock_config,
+        mock_stop_server_and_container,
+        mock_thread_start,
+    ):
+        mock_config.return_value.connection_string = 'mock-connection-string'
+        mock_config.return_value.incoming_topic_name = 'mock-incoming-topic'
+        mock_config.return_value.outgoing_topic_name = 'mock-outgoing-topic'
+        mock_config.return_value.max_concurrent_messages = 5
+        mock_config.return_value.incoming_topic_subscription = 'mock-subscription'
+        mock_config.return_value.max_receivable_messages = 1
+
+        mock_incoming_topic = MagicMock()
+        mock_outgoing_topic = MagicMock()
+        mock_core.return_value.get_topic.side_effect = [mock_incoming_topic, mock_outgoing_topic]
+        mock_core.return_value.get_storage_client.return_value = MagicMock()
+
+        service = ServiceBusService()
+
+        service.start_listening()
+
+        mock_incoming_topic.subscribe.assert_called_once_with(
+            'mock-subscription',
+            service.process_message,
+            1,
+        )
+        mock_stop_server_and_container.assert_called_once_with(delay_seconds=5)
+
     @patch('src.services.servicebus_service.OswQmCalculator')
-    @patch('src.services.servicebus_service.shutil.rmtree')
-    def test_process_message_success_without_sub_region(self, mock_rmtree, mock_calculator):
+    def test_process_message_success_without_sub_region(self, mock_calculator):
         # Mock message and dependencies
 
         self.service.storage_service.download_remote_file = MagicMock()
@@ -68,11 +102,9 @@ class TestServiceBusService(unittest.TestCase):
         self.service.storage_service.download_remote_file.assert_called_once()
         mock_calculator_instance.calculate_quality_metric.assert_called_once()
         self.service.storage_service.upload_local_file.assert_called_once()
-        mock_rmtree.assert_called_once()
 
     @patch('src.services.servicebus_service.OswQmCalculator')
-    @patch('src.services.servicebus_service.shutil.rmtree')
-    def test_process_message_success_with_sub_region(self, mock_rmtree, mock_calculator):
+    def test_process_message_success_with_sub_region(self, mock_calculator):
         # Mock message and dependencies
 
 
@@ -89,7 +121,6 @@ class TestServiceBusService(unittest.TestCase):
         self.service.storage_service.download_remote_file.assert_called()
         mock_calculator_instance.calculate_quality_metric.assert_called_once()
         self.service.storage_service.upload_local_file.assert_called_once()
-        mock_rmtree.assert_called_once()
 
     @patch('src.services.servicebus_service.logger')
     def test_process_message_failure(self, mock_logger):
@@ -125,9 +156,11 @@ class TestServiceBusService(unittest.TestCase):
         result = self.service.get_directory_path(url)
         self.assertEqual(result, expected_path)
 
+    @patch.object(ServiceBusService, '_stop_server_and_container')
     @patch('src.services.servicebus_service.threading.Thread.join')
-    def test_stop(self, mock_join):
+    def test_stop(self, mock_join, mock_stop_server_and_container):
         self.service.stop()
+        mock_stop_server_and_container.assert_called_once_with()
         mock_join.assert_called_once_with(timeout=0)
 
 
