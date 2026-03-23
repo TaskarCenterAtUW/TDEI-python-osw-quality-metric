@@ -1,5 +1,7 @@
 import os.path
 import shutil
+import time
+import signal
 from urllib.parse import urlparse
 
 from python_ms_core import Core
@@ -32,7 +34,8 @@ class ServiceBusService:
         self.incoming_topic = self.core.get_topic(self.config.incoming_topic_name, self.config.max_concurrent_messages)
         self.outgoing_topic = self.core.get_topic(self.config.outgoing_topic_name)
         self.storage_service = StorageService(self.core)
-        self.listening_thread = threading.Thread(target=self.incoming_topic.subscribe, args=[self.config.incoming_topic_subscription, self.process_message])
+        self._shutdown_triggered = threading.Event()
+        self.listening_thread = threading.Thread(target=self.start_listening)
         # Start listening to the things
         # self.incoming_topic.subscribe(self.config.incoming_topic_subscription, self.handle_message)
         self.listening_thread.start()
@@ -42,6 +45,16 @@ class ServiceBusService:
     #     # Logs and creates a thread for processing
     #     process_thread = threading.Thread(target=self.process_message, args=[msg])
     #     process_thread.start()
+
+    def start_listening(self):
+        self.incoming_topic.subscribe(
+            self.config.incoming_topic_subscription,
+            self.process_message,
+            self.config.max_receivable_messages,
+        )
+        if self.config.max_receivable_messages > 0:
+            logger.info('Listener finished processing available messages; stopping server/container.')
+            self._stop_server_and_container(delay_seconds=5)
 
     def process_message(self, msg: QueueMessage):
         logger.info(f"Processing message {msg}")
@@ -98,8 +111,6 @@ class ServiceBusService:
             self.send_response(response)
             # Process the message
             # Clean up the download_folder
-            logger.info('Cleaning up download folder')
-            shutil.rmtree(download_folder)
         except Exception as e:
             logger.error(f'Error processing message {msg.messageId} : {e}')
             response_data = {
@@ -115,7 +126,6 @@ class ServiceBusService:
                 data=  response_data
             )
             self.send_response(response)
-        pass
 
     def send_response(self, msg: QueueMessage):
         try:
@@ -140,6 +150,7 @@ class ServiceBusService:
         return folder_path
 
     def stop(self):
+        self._stop_server_and_container()
         self.listening_thread.join(timeout=0)
         pass
     # def get_directory_path(self,remote_url:str)-> str:
@@ -151,3 +162,27 @@ class ServiceBusService:
     #     container = parsed_url.path.split('/')[1]
     #     folder_path = parsed_url.path.split('/')[2]
     #     return os.path.join(self.config.get_download_folder(),file_name)
+
+    def _stop_server_and_container(self, delay_seconds: float = 0.0):
+        """
+        Attempt to gracefully stop the current process (stopping FastAPI/uvicorn and the Docker container).
+        """
+        logger.info('Gracefully stopping FastAPI/uvicorn and Docker container')
+        if self._shutdown_triggered.is_set():
+            logger.info('Server stop already in progress; skipping duplicate trigger.')
+            return
+        self._shutdown_triggered.set()
+        logger.info('Server stop triggered; scheduling shutdown.')
+        def _terminate():
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            try:
+                logger.info('Sending SIGTERM to stop server/container.')
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception as err:
+                logger.warning(f'Error occurred while sending SIGTERM: {err}')
+            finally:
+                logger.info('Forcing process exit to stop server/container.')
+                os._exit(0)
+
+        threading.Thread(target=_terminate, daemon=True).start()

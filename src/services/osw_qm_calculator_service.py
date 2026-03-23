@@ -45,7 +45,7 @@ class OswQmCalculator:
             input_file (str): The path to the input file. (dataset.zip file)
             algorithm_names (list): A list of algorithm names to be used for calculating quality metrics.
             output_path (str): The path to the output zip file.
-
+            ixn_file (str): The path to the sub-regions polygon file.
         Returns:
             None
 

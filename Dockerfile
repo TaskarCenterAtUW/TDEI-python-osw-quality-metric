@@ -1,6 +1,8 @@
-FROM python:3.11
+FROM python:3.10
 WORKDIR /code
 COPY ./requirements.txt /code/requirements.txt
+
+RUN pip install --upgrade pip setuptools
 RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 # RUN pip install dask[dataframe]
 # Add code for confidence metrics library

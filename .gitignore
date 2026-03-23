@@ -164,3 +164,4 @@ cython_debug/
 .ve
 MagicMock
 test_results
+.idea/
