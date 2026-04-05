@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from unittest.mock import patch, MagicMock, call
 from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator
@@ -196,8 +197,9 @@ class TestQMXNLibCalculator(unittest.TestCase):
             # Simulate running the script
             result = run(
                 [
-                    'python',
-                    'src/calculators/qm_xn_lib_calculator.py',
+                    sys.executable,
+                    '-m',
+                    'src.calculators.qm_xn_lib_calculator',
                     edges_file.name,
                     output_file.name,
                     polygon_file.name,
@@ -227,8 +229,9 @@ class TestQMXNLibCalculator(unittest.TestCase):
 
             result = run(
                 [
-                    'python',
-                    'src/calculators/qm_xn_lib_calculator.py',
+                    sys.executable,
+                    '-m',
+                    'src.calculators.qm_xn_lib_calculator',
                     edges_file.name,
                     output_file.name,
                 ],

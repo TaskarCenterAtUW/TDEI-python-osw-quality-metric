@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 import unittest
 import geopandas as gpd
@@ -75,8 +76,9 @@ class TestQMFixedCalculator(unittest.TestCase):
             # Simulate running the script as a standalone process
             result = run(
                 [
-                    'python',
-                    'src/calculators/qm_fixed_calculator.py',
+                    sys.executable,
+                    '-m',
+                    'src.calculators.qm_fixed_calculator',
                     edges_file.name,
                     output_file.name,
                     polygon_file.name,
@@ -110,8 +112,9 @@ class TestQMFixedCalculator(unittest.TestCase):
             # Simulate running the script as a standalone process
             result = run(
                 [
-                    'python',
-                    'src/calculators/qm_fixed_calculator.py',
+                    sys.executable,
+                    '-m',
+                    'src.calculators.qm_fixed_calculator',
                     edges_file.name,
                     output_file.name,
                 ],
