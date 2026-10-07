@@ -4,10 +4,15 @@ import sys
 import warnings
 import networkx as nx
 import traceback
-import osmnx as ox
+from flagstones import FallbackGrid
+from flagstones.clip import repair_reprojected
+from flagstones.crs import utm_crs_for
+from flagstones.geo import tiles_to_geodataframe
+from flagstones.osm import InsufficientResponseError, fetch_seed_graph, tiles_for_polygon
+from flagstones.pipeline import TILE_ALGORITHM_VERSION
 import dask_geopandas 
-from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
-from shapely.ops import voronoi_diagram
+from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon, GeometryCollection
+from shapely.geometry.base import BaseGeometry
 import itertools
 import numpy as np
 import pandas as pd
@@ -28,7 +33,7 @@ class QMXNLibCalculator(QMCalculator):
         self.output_file_path = output_file_path
         self.polygon_file_path = polygon_file_path
         warnings.filterwarnings("ignore")
-        self.default_projection = 'epsg:26910'
+        self.default_projection = None
         self.output_projection = 'epsg:4326'
         self.precision = 1e-5
         self.partition_count = partition_count
@@ -52,7 +57,7 @@ class QMXNLibCalculator(QMCalculator):
     def group_G_pts(self, G, poly):
         P = poly
         node_pts = [Point(x) for x in G.nodes()]
-        boundary = list(P.boundary.coords)
+        boundary = list(P.exterior.coords)
         segments = [LineString([boundary[i], boundary[i + 1]]) for i in range(len(boundary) - 1)]
         segment_point_map = {index: [] for index in range(len(segments))}
         for point in node_pts:
@@ -104,8 +109,10 @@ class QMXNLibCalculator(QMCalculator):
         return stats
     
     def get_measures_from_polygon(self, polygon, gdf):
-        if isinstance(polygon, MultiPolygon) and len(polygon.geoms)==1:
-            polygon = polygon.geoms[0]
+        # A multipart tile scores its largest part: one tile stays one output
+        # row, and tile_tra_score walks one exterior ring.
+        if isinstance(polygon, MultiPolygon):
+            polygon = max(polygon.geoms, key=lambda part: part.area)
         # crop gdf to the polygon
         cropped_gdf = gpd.clip(gdf, polygon)
         
@@ -125,28 +132,41 @@ class QMXNLibCalculator(QMCalculator):
         else:
             return feature
     
-    def create_voronoi_diagram(self, G_roads_simplified, bounds):
-        # first thin the nodes
-        gdf_roads_simplified = ox.graph_to_gdfs(G_roads_simplified, nodes=False)
-        voronoi = voronoi_diagram(gdf_roads_simplified.boundary.unary_union, envelope=bounds)
-        voronoi_gdf = gpd.GeoDataFrame({'geometry':voronoi.geoms})
-        voronoi_gdf = voronoi_gdf.set_crs(gdf_roads_simplified.crs)
-        voronoi_gdf_clipped = gpd.clip(voronoi_gdf, bounds)
-        voronoi_gdf_clipped = voronoi_gdf_clipped.to_crs(self.default_projection)
+    def work_crs(self, bounding_polygon: BaseGeometry) -> str:
+        """The UTM zone of the data's centroid, where tiling and scoring run."""
+        centre = bounding_polygon.centroid
+        return utm_crs_for(centre.x, centre.y)
 
-        return voronoi_gdf_clipped
-    
+    def create_tiles(
+        self, bounding_polygon: BaseGeometry, graph: nx.MultiDiGraph | None, crs: str
+    ) -> gpd.GeoDataFrame:
+        """Tiles covering `bounding_polygon`, geometry only, in `crs`.
+
+        `bounding_polygon` is in EPSG:4326. The rows are the intersection
+        tiles over `graph`, then fallback grid cells over the ground they
+        leave. `graph` is None when the hull holds no road, and fallback
+        cells then cover all of it.
+        """
+        tile_set = tiles_for_polygon(bounding_polygon, graph, crs=crs, fallback=FallbackGrid())
+        return tiles_to_geodataframe(tile_set, to_crs=crs)[["geometry"]]
+
     def calculate_quality_metric(self):
         try:
             gdf = gpd.read_file(self.edges_file_path)
+            edges_lonlat = gdf if gdf.crs is None else gdf.to_crs(self.output_projection)
+            # The hull of the edges as given: union_all would node them first.
+            bounding_polygon = GeometryCollection(list(edges_lonlat.geometry.dropna())).convex_hull
+            self.default_projection = self.work_crs(bounding_polygon)
 
             if self.polygon_file_path:
-                 tile_gdf = gpd.read_file(self.polygon_file_path)
+                tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
-                unified_geom = gdf.unary_union
-                bounding_polygon = unified_geom.convex_hull
-                g_roads_simplified = ox.graph.graph_from_polygon(bounding_polygon, network_type='drive', simplify=True, retain_all=True)
-                tile_gdf = self.create_voronoi_diagram(g_roads_simplified, bounding_polygon)
+                try:
+                    graph = fetch_seed_graph(bounding_polygon)
+                except InsufficientResponseError:
+                    # No road inside the hull: fallback cells tile all of it.
+                    graph = None
+                tile_gdf = self.create_tiles(bounding_polygon, graph, self.default_projection)
             
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
@@ -158,7 +178,13 @@ class QMXNLibCalculator(QMCalculator):
                 ('geometry', 'geometry'),
                 ('tra_score', 'object')
             ], gdf=gdf).compute(scheduler='multiprocessing')
+            if not self.polygon_file_path:
+                output["tile_algorithm_version"] = TILE_ALGORITHM_VERSION
             output = output.to_crs(self.output_projection) # The output should be in WGS84 (epsg:4326)
+            if not self.polygon_file_path:
+                # A fallback cell can keep a near-pinched vertex that turns
+                # self-intersecting once reprojected to WGS84:
+                output = output.set_geometry([repair_reprojected(g) for g in output.geometry], crs=output.crs)
             output.to_file(self.output_file_path, driver='GeoJSON')
             return QualityMetricResult(success=True, message='QMXNLibCalculator', output_file=self.output_file_path)
 

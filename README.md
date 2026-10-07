@@ -4,7 +4,7 @@ Quality metric calculator for OSW record.
 # Introduction:
 This service calculates the specific quality metric of a given OSW dataset. There are two algorithms that it supports:
 - fixed calculation (assumes a random score )
-- xn calculation. Calculates the intersection quality metric based on either input sub-polygons or vornoi generated polygons.
+- xn calculation. Calculates the intersection quality metric based on either input sub-polygons or intersection tiles. The tiles come from [flagstones](https://pypi.org/project/flagstones/): Voronoi tiles seeded on consolidated road junctions in the UTM zone of the data, with fallback grid cells over any ground the junction tiles leave.
 
 ## Requirements
 python 3.10
