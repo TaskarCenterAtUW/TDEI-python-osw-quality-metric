@@ -303,15 +303,24 @@ class TestQMXNLibCalculator(unittest.TestCase):
         mock_feature = MagicMock()
         mock_feature.geometry = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
         mock_feature.loc = {}
+        mock_feature.astype.return_value = mock_feature
         mock_gdf = MagicMock(spec=gpd.GeoDataFrame)
         mock_get_measures_from_polygon.return_value = {'tra_score': 0.8}
 
         result = self.calculator.qm_func(mock_feature, mock_gdf)
         self.assertEqual(result.loc['tra_score'], 0.8)
 
+    @patch('src.calculators.qm_xn_lib_calculator.QMXNLibCalculator.get_measures_from_polygon')
+    def test_qm_func_scores_a_row_of_a_geometry_only_frame(self, mock_get_measures_from_polygon):
+        mock_get_measures_from_polygon.return_value = {'tra_score': 0.5}
+        tiles = gpd.GeoDataFrame(geometry=[Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])])
+
+        result = self.calculator.qm_func(tiles.iloc[0], MagicMock())
+        self.assertEqual(result['tra_score'], 0.5)
+
     @patch('src.calculators.qm_xn_lib_calculator.gpd.GeoDataFrame')
     @patch('src.calculators.qm_xn_lib_calculator.voronoi_diagram')
-    @patch('src.calculators.qm_xn_lib_calculator.gnx.graph_edges_to_gdf')
+    @patch('src.calculators.qm_xn_lib_calculator.ox.graph_to_gdfs')
     def test_create_voronoi_diagram(self, mock_graph_edges_to_gdf, mock_voronoi_diagram, mock_geo_dataframe):
         # Mock graph and bounds
         mock_graph = MagicMock()
@@ -346,7 +355,7 @@ class TestQMXNLibCalculator(unittest.TestCase):
         result = self.calculator.create_voronoi_diagram(mock_graph, mock_bounds)
 
         # Assertions
-        mock_graph_edges_to_gdf.assert_called_once_with(mock_graph)
+        mock_graph_edges_to_gdf.assert_called_once_with(mock_graph, nodes=False)
         mock_voronoi_diagram.assert_called_once_with(mock_unary_union, envelope=mock_bounds)
         mock_voronoi_gdf.set_crs.assert_called_once_with(mock_gdf.crs)
         gpd.clip.assert_called_once_with(mock_voronoi_gdf, mock_bounds)

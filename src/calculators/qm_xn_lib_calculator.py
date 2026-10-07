@@ -4,7 +4,6 @@ import sys
 import warnings
 import networkx as nx
 import traceback
-import geonetworkx as gnx
 import osmnx as ox
 import dask_geopandas 
 from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
@@ -118,6 +117,9 @@ class QMXNLibCalculator(QMCalculator):
         poly = feature.geometry
         if (poly.geom_type == 'Polygon' or poly.geom_type == 'MultiPolygon'):
             measures = self.get_measures_from_polygon(poly, gdf)
+            # The row of a geometry-only frame has the geometry dtype, which
+            # cannot hold a score, and pandas 2 no longer upcasts on enlargement.
+            feature = feature.astype(object)
             feature.loc['tra_score'] = measures['tra_score']
             return feature
         else:
@@ -125,7 +127,7 @@ class QMXNLibCalculator(QMCalculator):
     
     def create_voronoi_diagram(self, G_roads_simplified, bounds):
         # first thin the nodes
-        gdf_roads_simplified = gnx.graph_edges_to_gdf(G_roads_simplified)
+        gdf_roads_simplified = ox.graph_to_gdfs(G_roads_simplified, nodes=False)
         voronoi = voronoi_diagram(gdf_roads_simplified.boundary.unary_union, envelope=bounds)
         voronoi_gdf = gpd.GeoDataFrame({'geometry':voronoi.geoms})
         voronoi_gdf = voronoi_gdf.set_crs(gdf_roads_simplified.crs)
