@@ -167,7 +167,28 @@ class QMXNLibCalculator(QMCalculator):
                     # No road inside the hull: fallback cells tile all of it.
                     graph = None
                 tile_gdf = self.create_tiles(bounding_polygon, graph, self.default_projection)
-            
+                # A score that sets tile attributes from the road network must
+                # read this `graph`, the one the tiles were seeded on. A second
+                # fetch can return a different OSM state, whose nodes need not
+                # match the tiles' `seed_osmids`. Graph node keys are OSM ids.
+                # With `graph` None every tile is a fallback cell with no seed
+                # nodes. Have create_tiles keep the tile columns, not geometry
+                # only:
+                #
+                #   tiles = tiles_to_geodataframe(tile_set, to_crs=None)  # tiling CRS
+                #   # tile_id, kind, seed_degree, seed_node_count, seed_osmids
+                #   # A junction's nodes belong to the tile they seeded, even
+                #   # where one lies inside a neighbouring tile's polygon:
+                #   members = tiles[["tile_id", "seed_osmids"]].explode("seed_osmids").dropna()
+                #   # Other nodes (dead ends, two-leg nodes) join by position:
+                #   nodes = ox.graph_to_gdfs(graph, edges=False).to_crs(tiles.crs)
+                #   rest = nodes.drop(members["seed_osmids"])
+                #   placed = gpd.sjoin(rest, tiles[["tile_id", "geometry"]], predicate="intersects")
+                #   tiles["new_score"] = score_by_tile(graph, members, placed)
+                #
+                # Carry the new columns through the per-tile apply below. The
+                # published GeoJSON has no tile_id column.
+
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
