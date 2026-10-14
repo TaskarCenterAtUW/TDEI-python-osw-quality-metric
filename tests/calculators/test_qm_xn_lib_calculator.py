@@ -74,112 +74,50 @@ class TestQMXNLibCalculator(unittest.TestCase):
         self.assertEqual(G, mock_graph_instance)
 
     @patch('src.calculators.qm_xn_lib_calculator.QMXNLibCalculator.work_crs', return_value='EPSG:32610')
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=nx.MultiDiGraph())
+    @patch('src.calculators.qm_xn_lib_calculator.create_intersection_polygons')
     @patch('src.calculators.qm_xn_lib_calculator.gpd.read_file')
     @patch('src.calculators.qm_xn_lib_calculator.dask_geopandas.from_geopandas')
-    def test_calculate_quality_metric_with_polygon(self, mock_from_geopandas, mock_read_file, mock_work_crs):
-        # Mock GeoDataFrames
-        mock_edges_gdf = MagicMock(spec=gpd.GeoDataFrame)
-        mock_polygon_gdf = MagicMock(spec=gpd.GeoDataFrame)
-        mock_result_gdf = MagicMock(spec=gpd.GeoDataFrame)
-
-        # Setup mock behaviors
-        mock_read_file.side_effect = [mock_edges_gdf, mock_polygon_gdf]
-        mock_edges_gdf.to_crs.return_value = mock_edges_gdf
-        mock_polygon_gdf.to_crs.return_value = mock_polygon_gdf
-        mock_polygon_subset = MagicMock(spec=gpd.GeoDataFrame)  # Mock for tile_gdf[['geometry']]
-        mock_polygon_gdf.__getitem__.return_value = mock_polygon_subset  # Mock subset behavior
-
-        mock_result_gdf.to_crs.return_value = mock_result_gdf
-        mock_result_gdf.to_file = MagicMock()
-        mock_from_geopandas.return_value.apply.return_value.compute.return_value = mock_result_gdf
-
-        # Execute the method
-        result = self.calculator.calculate_quality_metric()
-
-        # Assertions
+    def test_calculate_quality_metric_with_polygon(
+        self, mock_from_geopandas, mock_read_file, mock_polygons, mock_fetch, mock_work_crs,
+    ):
+        edges = gpd.GeoDataFrame(
+            geometry=[LineString([(500000, 5200000), (500100, 5200100)])], crs=32610,
+        )
+        tiles = gpd.GeoDataFrame(geometry=[box(500000, 5200000, 500100, 5200100)], crs=32610)
+        polygons = gpd.GeoDataFrame(geometry=[box(500020, 5200020, 500080, 5200080)], crs=32610)
+        mock_read_file.side_effect = [edges, tiles]
+        mock_polygons.return_value = polygons
+        mock_from_geopandas.return_value.apply.return_value.compute.return_value = polygons.assign(
+            tra_score=0.75, total_edges=10, connect_edges=7,
+        )
+        with patch.object(gpd.GeoDataFrame, 'to_file', autospec=True) as write:
+            result = self.calculator.calculate_quality_metric()
+        self.assertTrue(result.success, result.message)
         mock_read_file.assert_any_call(self.edges_file_path)
         mock_read_file.assert_any_call(self.polygon_file_path)
-        mock_edges_gdf.to_crs.assert_any_call(self.default_projection)
-        mock_polygon_gdf.to_crs.assert_called_once_with(self.default_projection)
-        mock_polygon_gdf.__getitem__.assert_called_once_with(['geometry'])  # Ensure subset call
-        mock_from_geopandas.assert_called_once_with(mock_polygon_subset, npartitions=os.cpu_count())
-        mock_result_gdf.to_file.assert_called_once_with(self.output_file_path, driver='GeoJSON')
-
-        # Verify the result
+        mock_fetch.assert_called_once()
+        self.assertIs(mock_polygons.call_args.args[0], mock_fetch.return_value)
+        self.assertIs(mock_from_geopandas.call_args.args[0], polygons)
+        written = write.call_args.args[0]
+        self.assertEqual(written.crs.to_epsg(), 4326)
+        self.assertEqual(written.tra_score.tolist(), [0.75])
+        self.assertEqual(written['ext:intersection_count'].tolist(), [1])
+        self.assertNotIn('intersection_count', written)
+        self.assertTrue(written.to_crs(32610).geom_equals_exact(tiles.geometry, tolerance=1e-6).all())
         self.assertIsInstance(result, QualityMetricResult)
-        self.assertTrue(result.success)
         self.assertEqual(result.message, 'QMXNLibCalculator')
         self.assertEqual(result.output_file, self.output_file_path)
 
-    @patch('src.calculators.qm_xn_lib_calculator.dask_geopandas.from_geopandas')
-    @patch('src.calculators.qm_xn_lib_calculator.gpd.read_file')
-    def test_main_with_polygon(self, mock_read_file, mock_from_geopandas):
-        with tempfile.NamedTemporaryFile(suffix='.geojson') as edges_file, \
-                tempfile.NamedTemporaryFile(suffix='.geojson') as output_file, \
-                tempfile.NamedTemporaryFile(suffix='.geojson') as polygon_file:
-            # Create dummy GeoJSON data for edges and polygon files
-            dummy_geojson = {
-                'type': 'FeatureCollection',
-                'features': [
-                    {
-                        'type': 'Feature',
-                        'geometry': {'type': 'LineString', 'coordinates': [[0, 0], [1, 1]]},
-                        'properties': {}
-                    }
-                ]
-            }
-
-            # Write dummy data to temporary files
-            edges_file.write(json.dumps(dummy_geojson).encode())
-            edges_file.flush()
-
-            polygon_file.write(json.dumps(dummy_geojson).encode())
-            polygon_file.flush()
-
-            # Mock the input GeoDataFrames
-            mock_edges_gdf = MagicMock(spec=gpd.GeoDataFrame)
-            mock_polygon_gdf = MagicMock(spec=gpd.GeoDataFrame)
-            mock_result_gdf = MagicMock(spec=gpd.GeoDataFrame)
-
-            # Mock behaviors for projections
-            mock_edges_gdf.to_crs.return_value = mock_edges_gdf
-            mock_polygon_gdf.to_crs.return_value = mock_polygon_gdf
-            mock_result_gdf.to_crs.return_value = mock_result_gdf
-
-            # Mock the subset behavior for `tile_gdf[['geometry']]`
-            mock_polygon_subset = MagicMock(spec=gpd.GeoDataFrame)
-            mock_polygon_gdf.__getitem__.return_value = mock_polygon_subset
-
-            # Mock the final result
-            mock_result_gdf.columns = ['geometry', 'tra_score']
-            mock_result_gdf['geometry'] = [LineString([(0, 0), (1, 1)])]
-            mock_result_gdf['tra_score'] = [1.0]
-            mock_result_gdf.to_file = MagicMock()
-
-            # Mock dask_geopandas behavior
-            mock_from_geopandas.return_value.apply.return_value.compute.return_value = mock_result_gdf
-
-            # Simulate running the script
-            result = run(
-                [
-                    sys.executable,
-                    '-m',
-                    'src.calculators.qm_xn_lib_calculator',
-                    edges_file.name,
-                    output_file.name,
-                    polygon_file.name,
-                ],
-                stdout=PIPE,
-                stderr=PIPE,
-                text=True,
-            )
-
-            # Debugging: Print stderr if the test fails
-            if result.returncode != 0:
-                print('Error:', result.stderr)
-
-            # Assertions
-            self.assertEqual(result.returncode, 0)
+    def test_cli_exposes_debug_and_distance_without_modes(self):
+        result = run(
+            [sys.executable, '-m', 'src.calculators.qm_xn_lib_calculator', '--help'],
+            stdout=PIPE, stderr=PIPE, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--debug-intersection-polygons', result.stdout)
+        self.assertIn('--intersection-distance', result.stdout)
+        self.assertNotIn('--mode', result.stdout)
 
     def test_main_without_polygon(self):
         with tempfile.NamedTemporaryFile(suffix='.geojson') as edges_file, \
@@ -309,8 +247,6 @@ class TestQMXNLibCalculator(unittest.TestCase):
         )
         tiles = gpd.GeoDataFrame(geometry=[PINCHED_CELL], crs='EPSG:32611')
         mock_create_tiles.return_value = tiles
-        scored = tiles.assign(tra_score=[0.5])
-        mock_from_geopandas.return_value.apply.return_value.compute.return_value = scored
         written = []
 
         def capture(frame, *args, **kwargs):
@@ -324,6 +260,7 @@ class TestQMXNLibCalculator(unittest.TestCase):
         (output,) = written
         self.assertEqual(output.crs.to_epsg(), 4326)
         self.assertTrue(output.is_valid.all())
+        self.assertEqual(output.tra_score.tolist(), [-1])
         self.assertAlmostEqual(
             output.to_crs('EPSG:32611').area.iloc[0], PINCHED_CELL.area, delta=1e-6 * PINCHED_CELL.area
         )
@@ -404,7 +341,7 @@ class TestIntersectionTiles(unittest.TestCase):
         cls.hull = gpd.read_file(cls.edges).to_crs(4326).union_all().convex_hull
 
     @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
-    def test_without_a_polygon_file_the_service_scores_library_tiles(self, fetch):
+    def test_without_a_polygon_file_the_service_averages_onto_library_tiles(self, fetch):
         fetch.return_value = self.graph
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "ixn_qm.geojson")
@@ -414,8 +351,12 @@ class TestIntersectionTiles(unittest.TestCase):
         fetch.assert_called_once()
         self.assertGreater(len(scored), 0)
         self.assertEqual(scored.crs.to_epsg(), 4326)
-        self.assertEqual(sorted(scored.columns), ["geometry", "tile_algorithm_version", "tra_score"])
-        self.assertTrue(scored["tra_score"].between(0, 1).all(), "no tile scores -1")
+        self.assertEqual(sorted(scored.columns), [
+            "ext:intersection_count", "geometry", "tile_algorithm_version", "tra_score",
+        ])
+        self.assertTrue((scored.tra_score.between(0, 1) | (scored.tra_score == -1)).all())
+        self.assertTrue((scored['ext:intersection_count'] > 0).any())
+        self.assertTrue((scored.loc[scored['ext:intersection_count'] == 0, 'tra_score'] == -1).all())
 
     @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
     def test_the_work_crs_is_the_utm_zone_of_the_data(self, fetch):
@@ -434,7 +375,7 @@ class TestIntersectionTiles(unittest.TestCase):
         self.assertTrue(all(bound.covers(g) for g in tiles.geometry))
 
     @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
-    def test_a_hull_with_no_road_network_is_scored_on_fallback_cells(self, fetch):
+    def test_a_hull_with_no_road_network_has_unavailable_scores_on_fallback_cells(self, fetch):
         fetch.side_effect = InsufficientResponseError("Found no graph nodes within the requested polygon")
         cells = tiles_for_polygon(self.hull, None, crs="EPSG:32610", fallback=FallbackGrid()).fallback
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,7 +384,8 @@ class TestIntersectionTiles(unittest.TestCase):
             self.assertTrue(result.success, result.message)
             scored = gpd.read_file(out)
         self.assertEqual(len(scored), len(cells))
-        self.assertTrue(scored["tra_score"].between(0, 1).all(), "a fallback cell scores like any tile")
+        self.assertTrue((scored.tra_score == -1).all())
+        self.assertTrue((scored['ext:intersection_count'] == 0).all())
 
     def test_a_hull_with_no_road_gets_only_fallback_cells(self):
         calculator = QMXNLibCalculator(self.edges, "unused.geojson")
@@ -461,13 +403,64 @@ class TestIntersectionTiles(unittest.TestCase):
             [[(40, 40), (60, 40), (60, 60), (40, 60)]],
         )
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
-        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.2)
+        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.0)
 
     def test_a_multipart_tile_is_scored_on_its_largest_part(self):
         calculator = QMXNLibCalculator("unused.geojson", "unused.geojson")
         tile = MultiPolygon([box(200, 0, 210, 10), box(0, 0, 100, 100)])
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
-        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.3)
+        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.1)
+
+    @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
+    def test_debug_polygon_scores_are_optional_and_average_back_to_output(self, fetch):
+        from src.calculators.intersection_polygons import average_scores_to_tiles
+        fetch.return_value = self.graph
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "ixn_qm.geojson")
+            calculator = QMXNLibCalculator(
+                self.edges, out, partition_count=1, debug_intersection_polygons=True,
+            )
+            result = calculator.calculate_quality_metric()
+            self.assertTrue(result.success, result.message)
+            debug = gpd.read_file(calculator.debug_output_path())
+            scored = gpd.read_file(out)
+            self.assertEqual(debug.crs.to_epsg(), 4326)
+            self.assertGreater(len(debug), 0)
+            self.assertTrue(debug.is_valid.all())
+            self.assertTrue((
+                debug['ext:side_count'] == debug['ext:degree'] + debug['ext:cap_side_count']
+            ).all())
+            self.assertTrue((debug['ext:connect_edges'] <= debug['ext:total_edges']).all())
+            self.assertTrue(debug.tra_score.between(0, 1).all())
+            self.assertEqual(set(debug.columns), {
+                'geometry', 'tra_score', 'ext:intersection_id', 'ext:degree',
+                'ext:side_count', 'ext:cap_side_count', 'ext:polygon_distance_m',
+                'ext:total_edges', 'ext:connect_edges',
+            })
+            tiles = calculator.create_tiles(self.hull, self.graph, calculator.default_projection)
+            expected = average_scores_to_tiles(debug.to_crs(tiles.crs), tiles)
+            self.assertEqual(scored['ext:intersection_count'].tolist(), expected.intersection_count.tolist())
+            for actual, mean in zip(scored.tra_score, expected.tra_score):
+                self.assertAlmostEqual(actual, mean)
+        fetch.assert_called_once()
+
+    @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph", return_value=None)
+    def test_debug_disabled_does_not_write_polygon_output(self, fetch):
+        with tempfile.TemporaryDirectory() as tmp:
+            calculator = QMXNLibCalculator(self.edges, os.path.join(tmp, "ixn_qm.geojson"))
+            result = calculator.calculate_quality_metric()
+            self.assertTrue(result.success, result.message)
+            self.assertFalse(os.path.exists(calculator.debug_output_path()))
+
+    @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph", return_value=None)
+    def test_debug_can_write_an_empty_intersection_layer(self, fetch):
+        with tempfile.TemporaryDirectory() as tmp:
+            calculator = QMXNLibCalculator(
+                self.edges, os.path.join(tmp, "ixn_qm.geojson"), debug_intersection_polygons=True,
+            )
+            result = calculator.calculate_quality_metric()
+            self.assertTrue(result.success, result.message)
+            self.assertTrue(gpd.read_file(calculator.debug_output_path()).empty)
 
     def test_the_tiles_and_the_fallback_cells_cover_the_hull_without_overlap(self):
         """Compared in the tiling CRS against the projected hull."""

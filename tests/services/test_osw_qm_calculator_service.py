@@ -1,4 +1,6 @@
 import tempfile
+import os
+import zipfile
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
 from src.calculators import QMXNLibCalculator, QMFixedCalculator
@@ -47,6 +49,31 @@ class TestOswQmCalculator(unittest.TestCase):
 
         calculator = self.calculator.get_osw_qm_calculator('ixn', 'ixn_file', 'edges.geojson', 'output.geojson')
         self.assertIsInstance(calculator, QMXNLibCalculator)
+        self.assertFalse(calculator.debug_intersection_polygons)
+
+    def test_intersection_options_are_passed_to_the_library(self):
+        service = OswQmCalculator(
+            cores_to_use=2, intersection_distance=35.0, debug_intersection_polygons=True,
+        )
+        calculator = service.get_osw_qm_calculator('ixn', None, 'edges.geojson', 'ixn_qm.geojson')
+        self.assertTrue(calculator.debug_intersection_polygons)
+        self.assertEqual(calculator.intersection_distance, 35.0)
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=None)
+    def test_output_zip_contains_polygon_debug_scores_only_when_enabled(self, fetch):
+        edges = os.path.join(os.path.dirname(__file__), '..', 'xnqm', 'inputs', 'p13_edges.geojson')
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = os.path.join(tmp, 'input.zip')
+            output_path = os.path.join(tmp, 'output.zip')
+            with zipfile.ZipFile(input_path, 'w') as archive:
+                archive.write(edges, 'test.edges.geojson')
+            for enabled in [False, True]:
+                with self.subTest(debug=enabled):
+                    service = OswQmCalculator(cores_to_use=1, debug_intersection_polygons=enabled)
+                    service.calculate_quality_metric(input_path, ['ixn'], output_path)
+                    with zipfile.ZipFile(output_path) as archive:
+                        self.assertIn('ixn_qm.geojson', archive.namelist())
+                        self.assertEqual('ixn_qm_intersection_scores.geojson' in archive.namelist(), enabled)
 
     @patch('src.services.osw_qm_calculator_service.zipfile.ZipFile')
     def test_zip_folder(self, mock_zipfile):

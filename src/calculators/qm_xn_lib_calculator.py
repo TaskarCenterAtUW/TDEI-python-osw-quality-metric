@@ -1,9 +1,14 @@
 from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.intersection_polygons import (
+    DEFAULT_INTERSECTION_DISTANCE, DIAGNOSTIC_PROPERTY_NAMES,
+    create_intersection_polygons, average_scores_to_tiles,
+)
+import argparse
 import geopandas as gpd
-import sys
 import warnings
 import networkx as nx
-import traceback
+import logging
+from pathlib import Path
 from flagstones import FallbackGrid
 from flagstones.clip import repair_reprojected
 from flagstones.crs import utm_crs_for
@@ -18,16 +23,27 @@ import numpy as np
 import pandas as pd
 import os
 
+logger = logging.getLogger(__name__)
+
 
 class QMXNLibCalculator(QMCalculator):
-    def __init__(self, edges_file_path:str, output_file_path:str, polygon_file_path:str=None, partition_count:int = os.cpu_count()):
+    def __init__(
+        self, edges_file_path: str, output_file_path: str, polygon_file_path: str = None,
+        partition_count: int = os.cpu_count(), *,
+        intersection_distance: float = DEFAULT_INTERSECTION_DISTANCE,
+        debug_intersection_polygons: bool = False,
+    ):
         """
         Initializes the QMXNLibCalculator class.
 
         Args:
             edges_file_path (str): Path to the file containing the OSW edge data.
             output_file_path (str): Path to where the output quality metric file will be saved.
-            polygon_file_path (str, optional): Path to the intersection polygon file. If not provided, will use the polygon computed from the convex hull of OSW edge data. Defaults to None.
+            polygon_file_path (str, optional): Existing output tiles. Otherwise,
+                tiles are generated over the convex hull of the OSW edges.
+            intersection_distance (float): Polygon side distance in meters.
+            debug_intersection_polygons (bool): Save intermediate polygon scores
+                beside the final output. Disabled by default for production.
         """
         self.edges_file_path = edges_file_path
         self.output_file_path = output_file_path
@@ -37,6 +53,8 @@ class QMXNLibCalculator(QMCalculator):
         self.output_projection = 'epsg:4326'
         self.precision = 1e-5
         self.partition_count = partition_count
+        self.intersection_distance = intersection_distance
+        self.debug_intersection_polygons = debug_intersection_polygons
 
     def add_edges_from_linestring(self, graph, linestring, edge_attrs):
         points = list(linestring.coords)
@@ -70,7 +88,7 @@ class QMXNLibCalculator(QMCalculator):
     def edges_are_connected(self, G, e1_pts, e2_pts):
         for pt1 in e1_pts:
             for pt2 in e2_pts:
-                if nx.has_path(G, pt1, pt2):
+                if pt1 != pt2 and nx.has_path(G, pt1, pt2):
                     return True
         return False
 
@@ -80,8 +98,6 @@ class QMXNLibCalculator(QMCalculator):
     def tile_tra_score(self, G, polygon):
         # assign each point to a polygon line
         pts_line_map = self.group_G_pts(G, polygon)
-        boundary_nodes = [item for sublist in pts_line_map.values() for item in sublist]
-
         # find all pair of edges
         edge_pairs = list(itertools.combinations_with_replacement(pts_line_map.keys(), 2))
 
@@ -97,15 +113,17 @@ class QMXNLibCalculator(QMCalculator):
 
     def get_stats(self, polygon, G, gdf):
         stats = {}
-        undirected_g = nx.Graph(G)
-
         try:
             n_total, n_connected, connected_pairs = self.tile_tra_score(G, polygon)
             stats['tra_score'] = n_connected / n_total
+            stats['total_edges'] = n_total
+            stats['connect_edges'] = n_connected
         except Exception as e:
             print(f"Unexpected {e}, {type(e)} with polygon {polygon} when getting number of connected edge pairs")
             #traceback.print_exc()
             stats["tra_score"] = -1
+            stats["total_edges"] = -1
+            stats["connect_edges"] = -1
         return stats
     
     def get_measures_from_polygon(self, polygon, gdf):
@@ -128,6 +146,8 @@ class QMXNLibCalculator(QMCalculator):
             # cannot hold a score, and pandas 2 no longer upcasts on enlargement.
             feature = feature.astype(object)
             feature.loc['tra_score'] = measures['tra_score']
+            feature.loc['total_edges'] = measures.get('total_edges', -1)
+            feature.loc['connect_edges'] = measures.get('connect_edges', -1)
             return feature
         else:
             return feature
@@ -150,6 +170,22 @@ class QMXNLibCalculator(QMCalculator):
         tile_set = tiles_for_polygon(bounding_polygon, graph, crs=crs, fallback=FallbackGrid())
         return tiles_to_geodataframe(tile_set, to_crs=crs)[["geometry"]]
 
+    def score_intersections(self, intersection_gdf, edges_gdf):
+        meta = intersection_gdf.iloc[:0].copy()
+        for column in ["tra_score", "total_edges", "connect_edges"]:
+            meta[column] = pd.Series(dtype="object")
+        if intersection_gdf.empty:
+            return meta
+        partitions = max(1, min(self.partition_count, os.cpu_count() or 1, len(intersection_gdf)))
+        df_dask = dask_geopandas.from_geopandas(intersection_gdf, npartitions=partitions)
+        return df_dask.apply(self.qm_func, axis=1, meta=meta, gdf=edges_gdf).compute(
+            scheduler='multiprocessing'
+        )
+
+    def debug_output_path(self):
+        output = Path(self.output_file_path)
+        return output.with_name(f"{output.stem}_intersection_scores.geojson")
+
     def calculate_quality_metric(self):
         try:
             gdf = gpd.read_file(self.edges_file_path)
@@ -158,49 +194,39 @@ class QMXNLibCalculator(QMCalculator):
             bounding_polygon = GeometryCollection(list(edges_lonlat.geometry.dropna())).convex_hull
             self.default_projection = self.work_crs(bounding_polygon)
 
+            try:
+                graph = fetch_seed_graph(bounding_polygon)
+            except InsufficientResponseError:
+                graph = None
+
             if self.polygon_file_path:
                 tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
-                try:
-                    graph = fetch_seed_graph(bounding_polygon)
-                except InsufficientResponseError:
-                    # No road inside the hull: fallback cells tile all of it.
-                    graph = None
                 tile_gdf = self.create_tiles(bounding_polygon, graph, self.default_projection)
-                # A score that sets tile attributes from the road network must
-                # read this `graph`, the one the tiles were seeded on. A second
-                # fetch can return a different OSM state, whose nodes need not
-                # match the tiles' `seed_osmids`. Graph node keys are OSM ids.
-                # With `graph` None every tile is a fallback cell with no seed
-                # nodes. Have create_tiles keep the tile columns, not geometry
-                # only:
-                #
-                #   tiles = tiles_to_geodataframe(tile_set, to_crs=None)  # tiling CRS
-                #   # tile_id, kind, seed_degree, seed_node_count, seed_osmids
-                #   # A junction's nodes belong to the tile they seeded, even
-                #   # where one lies inside a neighbouring tile's polygon:
-                #   members = tiles[["tile_id", "seed_osmids"]].explode("seed_osmids").dropna()
-                #   # Other nodes (dead ends, two-leg nodes) join by position:
-                #   nodes = ox.graph_to_gdfs(graph, edges=False).to_crs(tiles.crs)
-                #   rest = nodes.drop(members["seed_osmids"])
-                #   placed = gpd.sjoin(rest, tiles[["tile_id", "geometry"]], predicate="intersects")
-                #   tiles["new_score"] = score_by_tile(graph, members, placed)
-                #
-                # Carry the new columns through the per-tile apply below. The
-                # published GeoJSON has no tile_id column.
 
+            if gdf.crs is None:
+                gdf = gdf.set_crs(self.output_projection)
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
-            no_of_cores = min(self.partition_count, os.cpu_count())
-            df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=no_of_cores)
-
-            output = df_dask.apply(self.qm_func,axis=1, meta=[
-                ('geometry', 'geometry'),
-                ('tra_score', 'object')
-            ], gdf=gdf).compute(scheduler='multiprocessing')
+            # Reuse the graph that seeded the tiles; never fetch a second OSM state.
+            intersection_gdf = create_intersection_polygons(
+                graph, self.default_projection, self.intersection_distance,
+            )
+            intersection_scores = self.score_intersections(intersection_gdf, gdf)
+            output = average_scores_to_tiles(intersection_scores, tile_gdf)
+            if self.debug_intersection_polygons:
+                debug_output = intersection_scores.rename(columns=DIAGNOSTIC_PROPERTY_NAMES)
+                debug_output.to_crs(self.output_projection).to_file(
+                    self.debug_output_path(), driver='GeoJSON',
+                )
+            logger.info(
+                "Scored %d intersection polygons; %d/%d tiles have assigned intersections",
+                len(intersection_scores), int((output['intersection_count'] > 0).sum()), len(output),
+            )
             if not self.polygon_file_path:
                 output["tile_algorithm_version"] = TILE_ALGORITHM_VERSION
+            output = output.rename(columns=DIAGNOSTIC_PROPERTY_NAMES)
             output = output.to_crs(self.output_projection) # The output should be in WGS84 (epsg:4326)
             if not self.polygon_file_path:
                 # A fallback cell can keep a near-pinched vertex that turns
@@ -215,16 +241,16 @@ class QMXNLibCalculator(QMCalculator):
 
 
 if __name__ == '__main__':
-    osw_edge_file_path = sys.argv[1]  # First argument: OSW edge file path
-    qm_file_path = sys.argv[2]        # Second argument: Quality metric output file path
-
-    # Check if the optional third argument (xn_polygon_path) is provided
-    if len(sys.argv) > 3:
-        xn_polygon_path = sys.argv[3]  # Third argument: Intersection polygon file path (optional)
-        qm_calculator = QMXNLibCalculator(osw_edge_file_path, qm_file_path, xn_polygon_path)
-        print(qm_calculator.calculate_quality_metric())
-         
-    else:
-        # If the third argument is not provided, call without xn_polygon_path
-        qm_calculator = QMXNLibCalculator(osw_edge_file_path, qm_file_path)
-        print(qm_calculator.calculate_quality_metric())
+    parser = argparse.ArgumentParser(description='Average intersection polygon quality scores onto tiles.')
+    parser.add_argument('edges_file')
+    parser.add_argument('output_file')
+    parser.add_argument('tile_file', nargs='?', help='Optional precomputed intersection tiles.')
+    parser.add_argument('--intersection-distance', type=float, default=DEFAULT_INTERSECTION_DISTANCE)
+    parser.add_argument('--debug-intersection-polygons', action='store_true')
+    args = parser.parse_args()
+    calculator = QMXNLibCalculator(
+        args.edges_file, args.output_file, args.tile_file,
+        intersection_distance=args.intersection_distance,
+        debug_intersection_polygons=args.debug_intersection_polygons,
+    )
+    print(calculator.calculate_quality_metric())
