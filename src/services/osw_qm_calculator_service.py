@@ -27,7 +27,8 @@ class OswQmCalculator:
 
     """
 
-    def __init__(self, cores_to_use:int):
+    def __init__(self, cores_to_use:int, *, intersection_distance:float = 50.0,
+                 debug_intersection_polygons:bool = False):
         """
         Initializes the OswQmCalculator class.
 
@@ -36,6 +37,8 @@ class OswQmCalculator:
 
         """
         self.cores_to_use = cores_to_use
+        self.intersection_distance = intersection_distance
+        self.debug_intersection_polygons = debug_intersection_polygons
 
     def calculate_quality_metric(self, input_file, algorithm_names, output_path, ixn_file=None):
         """
@@ -103,7 +106,11 @@ class OswQmCalculator:
 
         """
         if algorithm_name == 'ixn':
-            return QMXNLibCalculator(edges_file, output_file, ixn_file, self.cores_to_use)
+            return QMXNLibCalculator(
+                edges_file, output_file, ixn_file, self.cores_to_use,
+                intersection_distance=self.intersection_distance,
+                debug_intersection_polygons=self.debug_intersection_polygons,
+            )
         else:
             return QMFixedCalculator(edges_file, output_file)
 
