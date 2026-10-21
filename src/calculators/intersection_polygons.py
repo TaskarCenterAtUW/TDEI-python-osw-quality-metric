@@ -120,22 +120,29 @@ def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTA
     # Index undirected physical edges once rather than scanning all edges for each node.
     for _, edge in edges.reset_index().iterrows():
         u, v = edge["u"], edge["v"]
-        pair = frozenset((u, v))
-        if u == v or pair in seen:
+        if u == v:
             continue
-        seen.add(pair)
-        incident[u].append(edge)
-        incident[v].append(edge)
+        geometry = edge.geometry
+        if geometry is None or geometry.is_empty:
+            geometry = LineString([nodes.loc[u].geometry, nodes.loc[v].geometry])
+        # Normalization makes reversed coordinate sequences identical without
+        # collapsing distinct roads that connect the same endpoint nodes.
+        edge_id = (frozenset((u, v)), geometry.normalize().wkb)
+        if edge_id in seen:
+            continue
+        seen.add(edge_id)
+        incident[u].append((edge_id, edge))
+        incident[v].append((edge_id, edge))
 
     candidates = set()
     for node_id, node_edges in incident.items():
-        directions = [direction_from_edge(edge, nodes, node_id) for edge in node_edges]
+        directions = [direction_from_edge(edge, nodes, node_id) for _, edge in node_edges]
         if len(deduplicate_directions([d for d in directions if d is not None])) >= 3:
             candidates.add(node_id)
     clusters = nx.Graph()
     clusters.add_nodes_from(sorted(candidates, key=str))
     for u in candidates:
-        for edge in incident[u]:
+        for _, edge in incident[u]:
             v = edge["v"] if edge["u"] == u else edge["u"]
             if v in candidates and nodes.loc[u].geometry.distance(nodes.loc[v].geometry) <= CLUSTER_DISTANCE:
                 clusters.add_edge(u, v)
@@ -145,12 +152,11 @@ def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTA
         directions = []
         seen = set()
         for node_id in sorted(members, key=str):
-            for edge in incident[node_id]:
+            for edge_id, edge in incident[node_id]:
                 u, v = edge["u"], edge["v"]
-                pair = frozenset((u, v))
-                if (u in members and v in members) or pair in seen:
+                if (u in members and v in members) or edge_id in seen:
                     continue
-                seen.add(pair)
+                seen.add(edge_id)
                 direction = direction_from_edge(edge, nodes, node_id)
                 if direction is not None:
                     directions.append(direction)

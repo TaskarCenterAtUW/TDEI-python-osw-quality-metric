@@ -101,8 +101,11 @@ score OSW connectivity inside each polygon, and average those scores onto tiles.
 Polygon sides are perpendicular to cleaned street approaches, 50 meters from the
 intersection center by default. Nearby connected intersection nodes within 20
 meters are clustered, directions within 10 degrees are merged, and gaps above
-135 degrees receive closing sides to prevent spikes. Scoring includes all input
-OSW edges and requires two distinct boundary points for same-side connectivity.
+135 degrees receive closing sides to prevent spikes. Road deduplication preserves
+distinct geometries between the same endpoint nodes while merging reversed
+copies of the same geometry, both before junction detection and within clusters.
+Scoring includes all input OSW edges and requires two distinct boundary points
+for same-side connectivity.
 
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is

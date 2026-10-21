@@ -23,6 +23,69 @@ def road_graph(positions, pairs, crs="EPSG:32610"):
 
 
 class TestIntersectionPolygons(unittest.TestCase):
+    def test_split_and_rejoin_roads_preserve_both_three_way_junctions(self):
+        positions = {
+            0: (500000, 5200000), 1: (500200, 5200000),
+            2: (499900, 5200000), 3: (500300, 5200000),
+        }
+        graph = road_graph(positions, [(0, 2), (1, 3)])
+        for offset in [100, -100]:
+            coords = [
+                positions[0], (500000, 5200000 + offset),
+                (500200, 5200000 + offset), positions[1],
+            ]
+            graph.add_edge(0, 1, geometry=LineString(coords))
+            graph.add_edge(1, 0, geometry=LineString(coords[::-1]))
+
+        polygons = create_intersection_polygons(graph, 'EPSG:32610')
+        self.assertEqual(set(polygons.intersection_id), {'0', '1'})
+        self.assertEqual(polygons.degree.tolist(), [3, 3])
+        self.assertTrue(polygons.is_valid.all())
+        self.assertTrue(polygons.set_index('intersection_id').loc['0'].geometry.equals(
+            box(499950, 5199950, 500050, 5200050),
+        ))
+        self.assertEqual(graph.number_of_edges(), 8)
+
+    def test_cluster_keeps_distinct_external_roads_with_shared_endpoints(self):
+        positions = {
+            0: (500000, 5200000), 1: (500014, 5200000),
+            2: (500150, 5200000), 3: (500014, 5200100),
+            4: (500114, 5200000), 5: (499900, 5200000),
+        }
+        graph = road_graph(positions, [(0, 1), (0, 5), (1, 3), (1, 4)])
+        for offset in [100, -100]:
+            coords = [
+                positions[0], (500000, 5200000 + offset),
+                (500150, 5200000 + offset), positions[2],
+            ]
+            graph.add_edge(0, 2, geometry=LineString(coords))
+            graph.add_edge(2, 0, geometry=LineString(coords[::-1]))
+
+        polygons = create_intersection_polygons(graph, 'EPSG:32610')
+        self.assertEqual(len(polygons), 1)
+        row = polygons.iloc[0]
+        self.assertEqual(row.intersection_id, '0|1')
+        self.assertEqual((row.degree, row.side_count, row.cap_side_count), (4, 4, 0))
+        self.assertTrue(row.geometry.equals(box(499957, 5199950, 500057, 5200050)))
+
+    def test_reverse_copies_do_not_bias_merged_approach_direction(self):
+        angle = np.deg2rad(5)
+        graph = road_graph(
+            {0: (500000, 5200000), 1: (500000, 5200100),
+             2: (500100, 5200000), 3: (499900, 5200000),
+             4: (500000, 5199900),
+             5: (500000 + 100 * np.sin(angle), 5200000 + 100 * np.cos(angle))},
+            [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)],
+        )
+        expected = create_intersection_polygons(graph, 'EPSG:32610').iloc[0]
+        # Distinct roads within 10 degrees still merge to one approach.
+        self.assertEqual(expected.degree, 4)
+        for _ in range(3):
+            graph.add_edge(1, 0, geometry=LineString([(500000, 5200100), (500000, 5200000)]))
+        actual = create_intersection_polygons(graph, 'EPSG:32610').iloc[0]
+        self.assertEqual(actual.degree, expected.degree)
+        self.assertTrue(actual.geometry.equals_exact(expected.geometry, 1e-8))
+
     def test_four_way_intersection_has_four_perpendicular_sides(self):
         graph = road_graph(
             {0: (500000, 5200000), 1: (500100, 5200000), 2: (500000, 5200100),
