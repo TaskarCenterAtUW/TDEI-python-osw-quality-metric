@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
-from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator
+from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator, SCORING_ALGORITHM_VERSION
 from src.calculators.qm_calculator import QualityMetricResult
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString, Polygon, Point, MultiPolygon
@@ -85,7 +85,10 @@ class TestQMXNLibCalculator(unittest.TestCase):
             geometry=[LineString([(500000, 5200000), (500100, 5200100)])], crs=32610,
         )
         tiles = gpd.GeoDataFrame(geometry=[box(500000, 5200000, 500100, 5200100)], crs=32610)
-        polygons = gpd.GeoDataFrame(geometry=[box(500020, 5200020, 500080, 5200080)], crs=32610)
+        polygons = gpd.GeoDataFrame(
+            {'side_roles': ['approach,approach,approach,approach']},
+            geometry=[box(500020, 5200020, 500080, 5200080)], crs=32610,
+        )
         mock_read_file.side_effect = [edges, tiles]
         mock_polygons.return_value = polygons
         mock_from_geopandas.return_value.apply.return_value.compute.return_value = polygons.assign(
@@ -283,7 +286,7 @@ class TestQMXNLibCalculator(unittest.TestCase):
         result = self.calculator.get_stats(dummy_polygon, dummy_graph, dummy_gdf)
 
         # Assertions
-        mock_tile_tra_score.assert_called_once_with(dummy_graph, dummy_polygon)
+        mock_tile_tra_score.assert_called_once_with(dummy_graph, dummy_polygon, None)
         self.assertIn('tra_score', result)
         self.assertEqual(result['tra_score'], -1)
 
@@ -313,7 +316,7 @@ class TestQMXNLibCalculator(unittest.TestCase):
         # Assertions
         mock_clip.assert_called_once_with(mock_gdf, single_polygon)  # Ensure the single polygon was used
         mock_graph_from_gdf.assert_called_once_with(mock_clipped_gdf)
-        mock_get_stats.assert_called_once_with(single_polygon, mock_graph, mock_clipped_gdf)
+        mock_get_stats.assert_called_once_with(single_polygon, mock_graph, mock_clipped_gdf, None)
         self.assertEqual(result, mock_stats)
 
     @patch('src.calculators.qm_xn_lib_calculator.QMXNLibCalculator.get_measures_from_polygon')
@@ -352,7 +355,7 @@ class TestIntersectionTiles(unittest.TestCase):
         self.assertGreater(len(scored), 0)
         self.assertEqual(scored.crs.to_epsg(), 4326)
         self.assertEqual(sorted(scored.columns), [
-            "ext:intersection_count", "geometry", "tile_algorithm_version", "tra_score",
+            "ext:intersection_count", "ext:scoring_algorithm_version", "geometry", "tile_algorithm_version", "tra_score",
         ])
         self.assertTrue((scored.tra_score.between(0, 1) | (scored.tra_score == -1)).all())
         self.assertTrue((scored['ext:intersection_count'] > 0).any())
@@ -431,11 +434,20 @@ class TestIntersectionTiles(unittest.TestCase):
                 debug['ext:side_count'] == debug['ext:degree'] + debug['ext:cap_side_count']
             ).all())
             self.assertTrue((debug['ext:connect_edges'] <= debug['ext:total_edges']).all())
+            self.assertTrue((debug['ext:total_edges'] == debug['ext:degree'] * (debug['ext:degree'] + 1) / 2).all())
+            self.assertTrue((debug['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
+            self.assertTrue((scored['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
+            for _, row in debug.iterrows():
+                roles = row['ext:side_roles'].split(',')
+                self.assertEqual(len(roles), row['ext:side_count'])
+                self.assertEqual(roles.count('approach'), row['ext:degree'])
+                self.assertEqual(roles.count('cap'), row['ext:cap_side_count'])
             self.assertTrue(debug.tra_score.between(0, 1).all())
             self.assertEqual(set(debug.columns), {
                 'geometry', 'tra_score', 'ext:intersection_id', 'ext:degree',
                 'ext:side_count', 'ext:cap_side_count', 'ext:polygon_distance_m',
                 'ext:total_edges', 'ext:connect_edges',
+                'ext:side_roles', 'ext:scoring_algorithm_version',
             })
             tiles = calculator.create_tiles(self.hull, self.graph, calculator.default_projection)
             expected = average_scores_to_tiles(debug.to_crs(tiles.crs), tiles)

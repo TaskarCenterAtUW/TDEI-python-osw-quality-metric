@@ -105,7 +105,13 @@ meters are clustered, directions within 10 degrees are merged, and gaps above
 distinct geometries between the same endpoint nodes while merging reversed
 copies of the same geometry, both before junction detection and within clusters.
 Scoring includes all input OSW edges and requires two distinct boundary points
-for same-side connectivity.
+for same-side connectivity. Closing sides remain part of the clipping boundary
+but are excluded from both the connected-pair count and the possible-pair count.
+Every actual street approach remains in the possible-pair count, even when it
+has no pedestrian boundary contacts. For `n` actual approaches, there are
+`n * (n + 1) / 2` possible pairs, including same-approach pairs. A fully connected
+T-junction with two connected contacts on each approach scores `6 / 6 = 1`;
+one connected contact per approach scores `3 / 6 = 0.5`.
 
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is
@@ -115,6 +121,11 @@ without assignments. Missing or failed scores are `-1` and are excluded from
 averages; a tile with no valid score remains `-1`. Fallback grid tiles with no
 nearby intersection also receive `-1`. Generated tiles retain
 `tile_algorithm_version`.
+Both final and debug outputs also include `ext:scoring_algorithm_version`, set to
+`intersection-approaches-v1` for this scoring rule. The previous intersection
+scorer counted closing sides as well, so scores can change for capped polygons
+and the tiles receiving their scores. The tiling version continues to describe
+only tile generation.
 
 ```shell
 python -m src.calculators.qm_xn_lib_calculator edges.geojson ixn_qm.geojson \
@@ -125,9 +136,15 @@ An optional third positional argument supplies precomputed tiles. With debug
 enabled, `ixn_qm_intersection_scores.geojson` is saved alongside the final output,
 with `tra_score` plus diagnostic properties `ext:intersection_id`, `ext:degree`,
 `ext:side_count`, `ext:cap_side_count`, `ext:polygon_distance_m`, `ext:total_edges`,
-and `ext:connect_edges`. Service runs include it in the output ZIP.
-`ext:total_edges` and `ext:connect_edges` refer to polygon-side pairs, including
-same-side pairs. New informational/debug properties use the `ext:` namespace;
+`ext:connect_edges`, and `ext:side_roles`. Service runs include it in the output ZIP.
+`ext:degree` counts actual approaches; `ext:side_count` counts all polygon sides,
+including the `ext:cap_side_count` closing sides. `ext:side_roles` is a
+comma-separated sequence of `approach` and `cap` labels in exterior-ring segment
+order: label `i` describes the segment from coordinate `i` to coordinate `i + 1`.
+Reordering the ring requires reordering these labels as well.
+`ext:total_edges` and `ext:connect_edges` refer to actual-approach pairs, including
+same-approach pairs, and exclude caps. New informational/debug properties use the
+`ext:` namespace;
 the existing `tra_score` and `tile_algorithm_version` names are preserved.
 Debug output is disabled by default and can be controlled in the library:
 

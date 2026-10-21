@@ -14,6 +14,7 @@ DIRECTION_TOLERANCE_DEGREES = 10.0
 MAX_DIRECTION_GAP_DEGREES = 135.0
 POLYGON_COLUMNS = [
     "intersection_id", "degree", "side_count", "cap_side_count", "polygon_distance_m",
+    "side_roles",
 ]
 DIAGNOSTIC_PROPERTY_NAMES = {
     column: f"ext:{column}"
@@ -105,6 +106,30 @@ def polygon_from_directions(center, directions, distance):
     return polygon
 
 
+def polygon_side_roles(polygon, center, directions, approach_count, distance):
+    """Label exterior segments by their generating constraint, in ring order.
+
+    Original approach directions precede the appended cap directions. Matching
+    both segment endpoints avoids relying on the convex hull's vertex order.
+    A string keeps the labels intact through Dask and GeoJSON serialization.
+    """
+    coords = np.asarray(polygon.exterior.coords) - np.array([center.x, center.y])
+    tolerance = max(1e-6, distance * 1e-8)
+    matched = []
+    for start, end in zip(coords[:-1], coords[1:]):
+        matches = [
+            index for index, direction in enumerate(directions)
+            if abs(np.dot(direction, start) - distance) <= tolerance
+            and abs(np.dot(direction, end) - distance) <= tolerance
+        ]
+        if len(matches) != 1:
+            raise ValueError("Cannot uniquely identify an intersection polygon side")
+        matched.append(matches[0])
+    if sorted(matched) != list(range(len(directions))):
+        raise ValueError("Intersection polygon does not preserve every approach and cap")
+    return ",".join("approach" if index < approach_count else "cap" for index in matched)
+
+
 def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTANCE):
     """Use the original tile seed graph, measuring all distances in its work CRS."""
     if not np.isfinite(distance) or distance <= 0:
@@ -173,6 +198,9 @@ def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTA
                 "side_count": len(polygon.exterior.coords) - 1,
                 "cap_side_count": cap_count,
                 "polygon_distance_m": float(distance),
+                "side_roles": polygon_side_roles(
+                    polygon, center, polygon_directions, len(directions), distance,
+                ),
                 "geometry": polygon,
             })
     return gpd.GeoDataFrame(records, geometry="geometry", crs=crs) if records else empty

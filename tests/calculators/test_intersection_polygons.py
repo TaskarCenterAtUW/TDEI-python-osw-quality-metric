@@ -1,13 +1,15 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import geopandas as gpd
 import networkx as nx
 import numpy as np
-from shapely import LineString, Point, box
+from shapely import LineString, Point, Polygon, box
 
 from src.calculators.intersection_polygons import (
     add_closing_cap_directions, average_scores_to_tiles, create_intersection_polygons,
-    deduplicate_directions, polygon_from_directions,
+    deduplicate_directions, polygon_from_directions, polygon_side_roles,
 )
 from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator
 
@@ -164,6 +166,140 @@ class TestIntersectionPolygons(unittest.TestCase):
         self.assertEqual((total, connected), (10, 1))
         self.assertTrue(all(a != b for a, b in pairs))
         self.assertFalse(calculator.edges_are_connected(graph, [(0, 50)], [(0, 50)]))
+
+
+class TestApproachScoring(unittest.TestCase):
+    def setUp(self):
+        self.calculator = QMXNLibCalculator('unused', 'unused', partition_count=1)
+
+    def intersection(self, angles=(0, 90, 180)):
+        positions = {0: (500000, 5200000)}
+        for index, angle in enumerate(np.deg2rad(angles), start=1):
+            positions[index] = (500000 + 100 * np.cos(angle), 5200000 + 100 * np.sin(angle))
+        graph = road_graph(positions, [(0, index) for index in range(1, len(positions))])
+        return create_intersection_polygons(graph, 'EPSG:32610')
+
+    def pedestrian_edges(self, feature, contacts=2, skip_side=None, caps_only=False):
+        coords = list(feature.geometry.exterior.coords)
+        center = np.array([500000, 5200000])
+        lines = []
+        for index, role in enumerate(feature.side_roles.split(',')):
+            if (role == 'cap') != caps_only or index == skip_side:
+                continue
+            for fraction in ([0.5] if contacts == 1 else [0.4, 0.6]):
+                boundary = (1 - fraction) * np.array(coords[index]) + fraction * np.array(coords[index + 1])
+                # Extend beyond the polygon to exercise clipping, too.
+                lines.append(LineString([center, center + 2 * (boundary - center)]))
+        return gpd.GeoDataFrame(geometry=lines, crs=32610)
+
+    def test_connected_t_scores_one_under_rotation_and_reflection(self):
+        for angles in [(0, 90, 180), (0, -90, 180), (27, 117, 207), (0, 100, 235.001)]:
+            with self.subTest(angles=angles):
+                feature = self.intersection(angles).iloc[0]
+                edges = self.pedestrian_edges(feature)
+                scored = self.calculator.qm_func(feature, edges)
+                self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (6, 6, 1))
+                self.assertEqual(feature.side_roles.split(',').count('approach'), 3)
+                self.assertEqual(feature.side_roles.split(',').count('cap'), feature.cap_side_count)
+                self.assertTrue(scored.geometry.equals(feature.geometry))
+
+    def test_uncapped_y_and_four_way_keep_all_sides(self):
+        for angles, pairs in [((0, 120, 240), 6), ((0, 90, 180, 270), 10), ((0, 100, 234.999), 6)]:
+            with self.subTest(angles=angles):
+                feature = self.intersection(angles).iloc[0]
+                self.assertEqual(feature.cap_side_count, 0)
+                edges = self.pedestrian_edges(feature)
+                scored = self.calculator.qm_func(feature, edges)
+                self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (pairs, pairs, 1))
+                legacy = self.calculator.get_measures_from_polygon(feature.geometry, edges)
+                self.assertEqual(legacy['tra_score'], scored.tra_score)
+
+    def test_single_contact_on_each_approach_does_not_earn_same_side_credit(self):
+        feature = self.intersection().iloc[0]
+        scored = self.calculator.qm_func(feature, self.pedestrian_edges(feature, contacts=1))
+        self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (6, 3, 0.5))
+
+    def test_missing_approach_stays_in_denominator(self):
+        feature = self.intersection().iloc[0]
+        missing_side = feature.side_roles.split(',').index('approach')
+        scored = self.calculator.qm_func(feature, self.pedestrian_edges(feature, skip_side=missing_side))
+        self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (6, 3, 0.5))
+
+    def test_disconnected_contacts_on_same_approach_do_not_earn_credit(self):
+        feature = self.intersection().iloc[0]
+        # Each pair of approaches has a path, but each approach's two contacts
+        # lie in different components: no same-approach pair is connected.
+        edges = gpd.GeoDataFrame(geometry=[
+            LineString([(499950, 5200010), (499990, 5200050)]),
+            LineString([(500010, 5200050), (500050, 5200010)]),
+            LineString([(499950, 5199990), (500050, 5199990)]),
+        ], crs=32610)
+        scored = self.calculator.qm_func(feature, edges)
+        self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (6, 3, 0.5))
+
+    def test_cap_contacts_never_earn_credit(self):
+        feature = self.intersection().iloc[0]
+        scored = self.calculator.qm_func(feature, self.pedestrian_edges(feature, caps_only=True))
+        self.assertEqual((scored.total_edges, scored.connect_edges, scored.tra_score), (6, 0, 0))
+
+    def test_path_can_use_cap_boundary_nodes_to_connect_actual_approaches(self):
+        feature = self.intersection().iloc[0]
+        # West and east are linked via a node on the southern cap.
+        edges = gpd.GeoDataFrame(geometry=[LineString([
+            (499940, 5200000), (499950, 5200000), (500000, 5199950),
+            (500050, 5200000), (500060, 5200000),
+        ])], crs=32610)
+        scored = self.calculator.qm_func(feature, edges)
+        self.assertEqual((scored.total_edges, scored.connect_edges), (6, 1))
+
+    def test_cap_corner_contacts_belong_to_the_actual_approach(self):
+        feature = self.intersection().iloc[0]
+        graph = nx.Graph()
+        graph.add_edge((499950, 5199950), (500050, 5199950))
+        total, connected, _ = self.calculator.tile_tra_score(graph, feature.geometry, feature.side_roles)
+        self.assertEqual((total, connected), (6, 1))
+
+    def test_side_labels_follow_constraints_after_ring_reordering(self):
+        center = Point(500000, 5200000)
+        directions, _ = add_closing_cap_directions([(1, 0), (0, 1), (-1, 0)])
+        polygon = polygon_from_directions(center, directions, 50)
+        coords = list(polygon.exterior.coords)[:-1]
+        for ring in [coords, coords[::-1], coords[1:] + coords[:1]]:
+            reordered = Polygon(ring)
+            roles = polygon_side_roles(reordered, center, directions, 3, 50).split(',')
+            for index, role in enumerate(roles):
+                segment = list(reordered.exterior.coords)[index:index + 2]
+                self.assertEqual(role, 'cap' if all(y == 5199950 for x, y in segment) else 'approach')
+
+    def test_invalid_side_labels_fail_instead_of_scoring_caps(self):
+        feature = self.intersection().iloc[0]
+        edges = self.pedestrian_edges(feature)
+        for roles in ['', 'approach', 'approach,approach,approach,unknown', 'cap,cap,cap,cap', 3]:
+            with self.subTest(roles=roles):
+                scored = self.calculator.get_measures_from_polygon(feature.geometry, edges, roles)
+                self.assertEqual(scored['tra_score'], -1)
+
+    def test_parallel_scoring_and_geojson_preserve_side_roles(self):
+        intersections = self.intersection()
+        edges = self.pedestrian_edges(intersections.iloc[0])
+        scored = self.calculator.score_intersections(intersections, edges)
+        self.assertEqual(scored.tra_score.tolist(), [1])
+        self.assertEqual(scored.total_edges.tolist(), [6])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'scores.geojson'
+            scored.to_crs(4326).to_file(path, driver='GeoJSON')
+            restored = gpd.read_file(path).to_crs(32610)
+        self.assertEqual(restored.side_roles.tolist(), scored.side_roles.tolist())
+        # Reprojection and file serialization must preserve the side mapping.
+        result = self.calculator.qm_func(restored.iloc[0], edges)
+        self.assertEqual((result.total_edges, result.connect_edges, result.tra_score), (6, 6, 1))
+
+    def test_intersection_pipeline_rejects_missing_side_roles(self):
+        intersections = self.intersection()
+        edges = self.pedestrian_edges(intersections.iloc[0])
+        for malformed in [intersections.drop(columns='side_roles'), intersections.assign(side_roles=None)]:
+            with self.subTest(columns=malformed.columns.tolist()), self.assertRaises(ValueError):
+                self.calculator.score_intersections(malformed, edges)
 
 
 class TestTileAveraging(unittest.TestCase):
