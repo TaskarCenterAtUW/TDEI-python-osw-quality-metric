@@ -15,6 +15,8 @@ class Config(BaseSettings):
     algorithm_dictionary: dict = {"fixed": QMFixedCalculator, "ixn": QMXNLibCalculator}
     max_concurrent_messages: int = os.environ.get('MAX_CONCURRENT_MESSAGES', 1)
     partition_count: int = os.environ.get('PARTITION_COUNT', 2)
+    intersection_distance: float = os.environ.get('INTERSECTION_DISTANCE', 50.0)
+    debug_intersection_polygons: bool = os.environ.get('DEBUG_INTERSECTION_POLYGONS', 'false')
     max_receivable_messages : int = os.environ.get('MAX_RECEIVABLE_MESSAGES', -1)
 
     def get_download_folder(self) -> str:
