@@ -88,7 +88,11 @@ class ServiceBusService:
             os.makedirs(output_folder,exist_ok=True)
             output_file_local_path = os.path.join(output_folder,'qm-output.zip')
             cores_to_use = self.config.partition_count
-            qm_calculator = OswQmCalculator(cores_to_use=cores_to_use)
+            qm_calculator = OswQmCalculator(
+                cores_to_use=cores_to_use,
+                intersection_distance=self.config.intersection_distance,
+                debug_intersection_polygons=self.config.debug_intersection_polygons,
+            )
             algorithm_names = quality_request.data.algorithm.split(',')
             qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
             # Upload the file
