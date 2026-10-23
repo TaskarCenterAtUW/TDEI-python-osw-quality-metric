@@ -14,7 +14,7 @@ DIRECTION_TOLERANCE_DEGREES = 10.0
 MAX_DIRECTION_GAP_DEGREES = 135.0
 POLYGON_COLUMNS = [
     "intersection_id", "degree", "side_count", "cap_side_count", "polygon_distance_m",
-    "side_roles",
+    "side_roles", "extends_beyond_dataset",
 ]
 DIAGNOSTIC_PROPERTY_NAMES = {
     column: f"ext:{column}"
@@ -130,8 +130,16 @@ def polygon_side_roles(polygon, center, directions, approach_count, distance):
     return ",".join("approach" if index < approach_count else "cap" for index in matched)
 
 
-def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTANCE):
-    """Use the original tile seed graph, measuring all distances in its work CRS."""
+def create_intersection_polygons(
+    graph, crs, distance=DEFAULT_INTERSECTION_DISTANCE, *, dataset_footprint=None,
+):
+    """Build scoring polygons using the boundary-preserving graph in its work CRS.
+
+    When supplied, ``dataset_footprint`` must be in ``crs``. Only junction nodes
+    covered by that footprint may seed clusters; roads to outside nodes still
+    supply approach directions. Polygons stay whole for scoring. The boundary
+    diagnostic is unknown (None) when no footprint is supplied.
+    """
     if not np.isfinite(distance) or distance <= 0:
         raise ValueError("intersection_distance must be a positive finite number")
     empty = gpd.GeoDataFrame(columns=POLYGON_COLUMNS + ["geometry"], geometry="geometry", crs=crs)
@@ -161,6 +169,8 @@ def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTA
 
     candidates = set()
     for node_id, node_edges in incident.items():
+        if dataset_footprint is not None and not dataset_footprint.covers(nodes.loc[node_id].geometry):
+            continue
         directions = [direction_from_edge(edge, nodes, node_id) for _, edge in node_edges]
         if len(deduplicate_directions([d for d in directions if d is not None])) >= 3:
             candidates.add(node_id)
@@ -200,6 +210,9 @@ def create_intersection_polygons(graph, crs, distance=DEFAULT_INTERSECTION_DISTA
                 "polygon_distance_m": float(distance),
                 "side_roles": polygon_side_roles(
                     polygon, center, polygon_directions, len(directions), distance,
+                ),
+                "extends_beyond_dataset": (
+                    not dataset_footprint.covers(polygon) if dataset_footprint is not None else None
                 ),
                 "geometry": polygon,
             })

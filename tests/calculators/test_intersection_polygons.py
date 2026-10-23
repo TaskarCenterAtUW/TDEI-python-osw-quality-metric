@@ -25,6 +25,50 @@ def road_graph(positions, pairs, crs="EPSG:32610"):
 
 
 class TestIntersectionPolygons(unittest.TestCase):
+    def test_outside_junction_supplies_an_approach_but_cannot_join_cluster(self):
+        graph = road_graph(
+            {0: (500000, 5200000), 1: (500000, 5200014),
+             2: (499900, 5200000), 3: (500000, 5199900),
+             4: (500000, 5200114), 5: (500100, 5200014)},
+            [(0, 1), (0, 2), (0, 3), (1, 4), (1, 5)],
+        )
+        # Node 0 lies exactly on the footprint boundary; node 1 lies outside.
+        footprint = box(499800, 5199800, 500200, 5200000)
+        polygons = create_intersection_polygons(graph, 32610, dataset_footprint=footprint)
+        self.assertEqual(polygons.intersection_id.tolist(), ['0'])
+        row = polygons.iloc[0]
+        self.assertEqual((row.degree, row.cap_side_count), (3, 1))
+        self.assertTrue(row.geometry.equals(box(499950, 5199950, 500050, 5200050)))
+        self.assertTrue(row.extends_beyond_dataset)
+        self.assertTrue(create_intersection_polygons(
+            graph, 32610, dataset_footprint=box(499700, 5199700, 499800, 5199800),
+        ).empty)
+
+    def test_interior_polygon_and_score_are_unchanged_by_footprint(self):
+        graph = road_graph(
+            {0: (500000, 5200000), 1: (500100, 5200000),
+             2: (500000, 5200100), 3: (499900, 5200000)},
+            [(0, 1), (0, 2), (0, 3)],
+        )
+        original = create_intersection_polygons(graph, 32610).iloc[0]
+        calculator = QMXNLibCalculator('unused', 'unused')
+        edges = gpd.GeoDataFrame(geometry=[
+            LineString([(499900, 5200010), (500100, 5200010)]),
+            LineString([(500000, 5200010), (500000, 5200100)]),
+        ], crs=32610)
+        expected = calculator.qm_func(original, edges)
+        for footprint, extends in [
+            (box(499800, 5199800, 500200, 5200200), False),
+            (box(499800, 5199800, 500200, 5200001), True),
+        ]:
+            row = create_intersection_polygons(graph, 32610, dataset_footprint=footprint).iloc[0]
+            self.assertEqual(row.extends_beyond_dataset, extends)
+            self.assertEqual(row.side_roles, original.side_roles)
+            self.assertTrue(row.geometry.equals(original.geometry))
+            scored = calculator.qm_func(row, edges)
+            self.assertEqual(scored.tra_score, expected.tra_score)
+            self.assertEqual(scored.total_edges, 6)
+
     def test_split_and_rejoin_roads_preserve_both_three_way_junctions(self):
         positions = {
             0: (500000, 5200000), 1: (500200, 5200000),

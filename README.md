@@ -4,7 +4,7 @@ Quality metric calculator for OSW record.
 # Introduction:
 This service calculates the specific quality metric of a given OSW dataset. There are two algorithms that it supports:
 - fixed calculation (assumes a random score )
-- xn calculation. Scores local intersection polygons, then averages their scores onto either supplied tiles or generated intersection tiles. Generated tiles come from [flagstones](https://pypi.org/project/flagstones/): Voronoi tiles seeded on consolidated road junctions in the UTM zone of the data, with fallback grid cells over any ground the junction tiles leave. Polygon generation reuses the same OSM seed graph as tiling.
+- xn calculation. Scores local intersection polygons, then averages their scores onto either supplied tiles or generated intersection tiles. Generated tiles come from [flagstones](https://pypi.org/project/flagstones/): Voronoi tiles seeded on consolidated road junctions in the UTM zone of the data, with fallback grid cells over any ground the junction tiles leave. Polygon generation and tiling share one OSM download, with separate graph trims.
 
 ## Requirements
 python 3.10
@@ -113,6 +113,18 @@ has no pedestrian boundary contacts. For `n` actual approaches, there are
 T-junction with two connected contacts on each approach scores `6 / 6 = 1`;
 one connected contact per approach scores `3 / 6 = 0.5`.
 
+The OSM fetch retains roads connected to nodes inside the dataset's convex hull,
+including roads whose other endpoint lies outside it. This preserves approaches
+at boundary junctions while keeping the existing Flagstones road/access filter.
+Only junction nodes covered by the hull may seed scoring clusters; outside
+nodes still provide approach geometry. Tile generation uses the original graph
+trim, removing outside nodes, and retains the original tile geometries for the
+same OSM data. The initial 500-meter buffer trim and road simplification also
+retain their original behavior. Only scoring polygons use the retained boundary
+approaches. Tile scores and intersection counts can change as new polygons
+contribute. Scoring polygons remain whole, so pedestrian data ending at the dataset
+boundary can leave some approaches without contacts and lower the score.
+
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is
 the number of assigned polygons (including any whose scoring failed). Assignment
@@ -136,7 +148,11 @@ An optional third positional argument supplies precomputed tiles. With debug
 enabled, `ixn_qm_intersection_scores.geojson` is saved alongside the final output,
 with `tra_score` plus diagnostic properties `ext:intersection_id`, `ext:degree`,
 `ext:side_count`, `ext:cap_side_count`, `ext:polygon_distance_m`, `ext:total_edges`,
-`ext:connect_edges`, and `ext:side_roles`. Service runs include it in the output ZIP.
+`ext:connect_edges`, `ext:side_roles`, and `ext:extends_beyond_dataset`.
+Service runs include it in the output ZIP.
+`ext:extends_beyond_dataset` is true when any part of the scoring polygon lies
+outside the input edges' convex hull. It flags potentially incomplete pedestrian
+coverage for interpretation; it does not modify the scoring formula.
 `ext:degree` counts actual approaches; `ext:side_count` counts all polygon sides,
 including the `ext:cap_side_count` closing sides. `ext:side_roles` is a
 comma-separated sequence of `approach` and `cap` labels in exterior-ring segment

@@ -13,7 +13,7 @@ from flagstones import FallbackGrid
 from flagstones.clip import repair_reprojected
 from flagstones.crs import utm_crs_for
 from flagstones.geo import tiles_to_geodataframe
-from flagstones.osm import InsufficientResponseError, fetch_seed_graph, tiles_for_polygon
+from flagstones.osm import InsufficientResponseError, SEED_CUSTOM_FILTER, tiles_for_polygon
 from flagstones.pipeline import TILE_ALGORITHM_VERSION
 import dask_geopandas 
 from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon, GeometryCollection
@@ -22,9 +22,86 @@ import itertools
 import numpy as np
 import pandas as pd
 import os
+import osmnx as ox
+from osmnx import _overpass
+from osmnx.graph import _create_graph
+import re
+import time
+from requests.exceptions import ConnectionError, HTTPError, Timeout
+from osmnx._errors import ResponseStatusCodeError
 
 logger = logging.getLogger(__name__)
 SCORING_ALGORITHM_VERSION = "intersection-approaches-v1"
+
+
+def fetch_seed_graph(polygon):
+    """Fetch one OSM snapshot, preserving boundary approaches for polygons.
+
+    Follow OSMnx 2.0.7's graph_from_polygon pipeline with Flagstones' filter,
+    simplify=True and retain_all=True. Keep its original 500 m buffer trimming
+    BEFORE simplification; only the final hull trim retains outside neighbors.
+    A strict final trim can then recover the original tile seed graph exactly.
+    These two private OSMnx helpers let both graphs share one download. Recheck
+    this pipeline against graph_from_polygon when upgrading the pinned OSMnx.
+    """
+    try:
+        if not polygon.is_valid:
+            raise ValueError("The geometry of `polygon` is invalid.")
+        if not isinstance(polygon, (Polygon, MultiPolygon)):
+            raise TypeError("The geometry of `polygon` must be a Polygon or MultiPolygon.")
+        projected, crs = ox.projection.project_geometry(polygon)
+        buffered, _ = ox.projection.project_geometry(
+            projected.buffer(500), crs=crs, to_latlong=True,
+        )
+        responses = _overpass._download_overpass_network(buffered, 'all', SEED_CUSTOM_FILTER)
+        graph = _create_graph(responses, 'all' in ox.settings.bidirectional_network_types)
+        graph = ox.truncate.truncate_graph_polygon(graph, buffered, truncate_by_edge=False)
+        graph = ox.simplification.simplify_graph(graph)
+        boundary_graph = ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=True)
+        counts = ox.stats.count_streets_per_node(graph, nodes=boundary_graph.nodes)
+        nx.set_node_attributes(boundary_graph, counts, 'street_count')
+        return boundary_graph
+    except InsufficientResponseError:
+        raise
+    except ValueError as err:
+        # Preserve Flagstones' empty-network handling without hiding other errors.
+        if "Found no graph nodes within the requested polygon" in str(err):
+            raise InsufficientResponseError(str(err)) from err
+        raise
+
+
+def seed_graph_for_tiles(graph, polygon):
+    """Recover the original strict hull trim without mutating the scoring graph."""
+    if graph is None or graph.number_of_nodes() == 0:
+        return graph
+    return ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=False)
+
+
+def fetch_seed_graph_with_retry(polygon):
+    """Retry transient Overpass failures without treating them as an empty graph."""
+    for attempt in range(3):
+        try:
+            return fetch_seed_graph(polygon)
+        except (ConnectionError, Timeout, HTTPError, ResponseStatusCodeError) as exc:
+            if isinstance(exc, HTTPError):
+                status = exc.response.status_code if exc.response is not None else None
+            elif isinstance(exc, ResponseStatusCodeError):
+                # OSMnx discards the response object and embeds status in its message.
+                match = re.search(r"responded: (\d{3})\b", str(exc))
+                status = int(match.group(1)) if match else None
+            else:
+                status = None
+            transient = isinstance(exc, (ConnectionError, Timeout)) or status in {
+                429, 500, 502, 503, 504,
+            }
+            if not transient or attempt == 2:
+                raise
+            delay = 10 * 2 ** attempt
+            logger.warning(
+                "Temporary Overpass failure (%s); retrying in %s seconds (attempt %s/3)",
+                type(exc).__name__, delay, attempt + 2,
+            )
+            time.sleep(delay)
 
 
 class QMXNLibCalculator(QMCalculator):
@@ -209,23 +286,29 @@ class QMXNLibCalculator(QMCalculator):
             self.default_projection = self.work_crs(bounding_polygon)
 
             try:
-                graph = fetch_seed_graph(bounding_polygon)
+                graph = fetch_seed_graph_with_retry(bounding_polygon)
             except InsufficientResponseError:
                 graph = None
 
             if self.polygon_file_path:
                 tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
-                tile_gdf = self.create_tiles(bounding_polygon, graph, self.default_projection)
+                tile_graph = seed_graph_for_tiles(graph, bounding_polygon)
+                tile_gdf = self.create_tiles(bounding_polygon, tile_graph, self.default_projection)
 
             if gdf.crs is None:
                 gdf = gdf.set_crs(self.output_projection)
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
-            # Reuse the graph that seeded the tiles; never fetch a second OSM state.
+            dataset_footprint = repair_reprojected(gpd.GeoSeries(
+                [bounding_polygon], crs=self.output_projection,
+            ).to_crs(self.default_projection).iloc[0])
+            # Scoring keeps outside approaches; tiles use the original strict trim
+            # of the same downloaded OSM state.
             intersection_gdf = create_intersection_polygons(
                 graph, self.default_projection, self.intersection_distance,
+                dataset_footprint=dataset_footprint,
             )
             intersection_scores = self.score_intersections(intersection_gdf, gdf)
             output = average_scores_to_tiles(intersection_scores, tile_gdf)

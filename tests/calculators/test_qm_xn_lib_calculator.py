@@ -2,7 +2,10 @@ import os
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
-from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator, SCORING_ALGORITHM_VERSION
+from src.calculators.qm_xn_lib_calculator import (
+    QMXNLibCalculator, SCORING_ALGORITHM_VERSION, fetch_seed_graph, seed_graph_for_tiles,
+)
+from src.calculators.intersection_polygons import create_intersection_polygons
 from src.calculators.qm_calculator import QualityMetricResult
 import geopandas as gpd
 from shapely.geometry import LineString, MultiLineString, Polygon, Point, MultiPolygon
@@ -15,7 +18,7 @@ from shapely.geometry import box
 from shapely import wkt
 
 from flagstones import FallbackGrid
-from flagstones.osm import InsufficientResponseError, tiles_for_polygon
+from flagstones.osm import InsufficientResponseError, SEED_CUSTOM_FILTER, tiles_for_polygon
 
 INPUTS = os.path.join(os.path.dirname(__file__), "..", "xnqm", "inputs")
 
@@ -33,6 +36,104 @@ PINCHED_CELL = wkt.loads(
     "488750 5236750, 488951.36020132154 5236750, 488950.891829139 5236500, "
     "488950.42345695634 5236250))"
 )
+
+
+class TestBoundarySeedGraph(unittest.TestCase):
+    @patch('osmnx._overpass._download_overpass_network')
+    def test_boundary_t_keeps_three_approaches_and_original_tile_geometries(self, download):
+        # Goldendale's failure pattern: a junction just inside the northern
+        # boundary, with the north and west road endpoints outside the hull.
+        positions = {
+            48719999: (-120.8160817, 45.8382062),
+            1: (-120.8160817, 45.8392),
+            2: (-120.819, 45.8382062),
+            3: (-120.8160817, 45.8362),
+            # Beyond even OSMnx's download buffer: trimming this before
+            # simplification must leave node 3 as the original road endpoint.
+            4: (-120.8160817, 45.82),
+        }
+        response = {'elements': [
+            {'type': 'node', 'id': node, 'lon': lon, 'lat': lat}
+            for node, (lon, lat) in positions.items()
+        ] + [
+            {'type': 'way', 'id': node, 'nodes': [48719999, node],
+             'tags': {'highway': 'residential'}}
+            for node in [1, 2, 3]
+        ] + [
+            {'type': 'way', 'id': 4, 'nodes': [3, 4], 'tags': {'highway': 'residential'}},
+        ]}
+        download.return_value = [response]
+        hull = box(-120.818, 45.835, -120.814, 45.8382175)
+        old_graph = ox.graph_from_polygon(
+            hull, custom_filter=SEED_CUSTOM_FILTER, simplify=True, retain_all=True,
+        )
+        download.reset_mock()
+        graph = fetch_seed_graph(hull)
+        download.assert_called_once()
+        self.assertEqual(download.call_args.args[1:], ('all', SEED_CUSTOM_FILTER))
+        self.assertEqual(set(old_graph.neighbors(48719999)), {3})
+        self.assertEqual(set(graph.neighbors(48719999)), {1, 2, 3})
+        footprint = gpd.GeoSeries([hull], crs=4326).to_crs(32610).iloc[0]
+        self.assertTrue(create_intersection_polygons(old_graph, 32610).empty)
+        polygons = create_intersection_polygons(graph, 32610, dataset_footprint=footprint)
+        self.assertEqual(polygons.intersection_id.tolist(), ['48719999'])
+        row = polygons.iloc[0]
+        self.assertEqual((row.degree, row.side_count, row.cap_side_count), (3, 4, 1))
+        self.assertTrue(row.extends_beyond_dataset)
+        crossing = gpd.GeoSeries([LineString([
+            (-120.8161667, 45.8381421), (-120.8160267, 45.8381398),
+        ])], crs=4326).to_crs(32610).iloc[0]
+        self.assertTrue(row.geometry.covers(crossing))
+        tile_graph = seed_graph_for_tiles(graph, hull)
+        self.assertEqual(dict(tile_graph.nodes(data=True)), dict(old_graph.nodes(data=True)))
+        self.assertEqual(
+            {(u, v, key): data for u, v, key, data in tile_graph.edges(keys=True, data=True)},
+            {(u, v, key): data for u, v, key, data in old_graph.edges(keys=True, data=True)},
+        )
+        # Trimming tiles must not remove the approaches used by polygons.
+        self.assertEqual(set(graph.neighbors(48719999)), {1, 2, 3})
+        calculator = QMXNLibCalculator('unused', 'unused')
+        tiles = calculator.create_tiles(hull, tile_graph, 'EPSG:32610')
+        original_tiles = calculator.create_tiles(hull, old_graph, 'EPSG:32610')
+        self.assertEqual(len(tiles), len(original_tiles))
+        self.assertTrue(tiles.geom_equals_exact(original_tiles.geometry, tolerance=0).all())
+        self.assertTrue(all(footprint.buffer(1e-6).covers(tile) for tile in tiles.geometry))
+        self.assertAlmostEqual(tiles.union_all().area / footprint.area, 1.0, places=6)
+        self.assertAlmostEqual(tiles.area.sum() / footprint.area, 1.0, places=6)
+
+        # Check routing through the production calculator, including serialization.
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = os.path.join(tmp, 'edges.geojson')
+            gpd.GeoDataFrame(geometry=[LineString(hull.exterior.coords)], crs=4326).to_file(input_path)
+            calculator = QMXNLibCalculator(
+                input_path, os.path.join(tmp, 'scores.geojson'),
+                partition_count=1, debug_intersection_polygons=True,
+            )
+            with patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=graph) as fetch:
+                result = calculator.calculate_quality_metric()
+            self.assertTrue(result.success, result.message)
+            fetch.assert_called_once()
+            output = gpd.read_file(calculator.output_file_path)
+            self.assertTrue(output.geom_equals_exact(original_tiles.to_crs(4326).geometry, tolerance=1e-12).all())
+            debug = gpd.read_file(calculator.debug_output_path())
+            self.assertEqual(debug['ext:intersection_id'].tolist(), ['48719999'])
+            self.assertEqual(debug['ext:degree'].tolist(), [3])
+
+    @patch('src.calculators.qm_xn_lib_calculator._overpass._download_overpass_network')
+    def test_fetch_preserves_empty_network_handling_and_propagates_other_errors(self, fetch):
+        for error in [
+            InsufficientResponseError('No matching roads'),
+            ValueError('Found no graph nodes within the requested polygon'),
+        ]:
+            with self.subTest(error=error):
+                fetch.side_effect = error
+                with self.assertRaises(InsufficientResponseError):
+                    fetch_seed_graph(box(-121, 45, -120, 46))
+        error = ValueError('Invalid polygon')
+        fetch.side_effect = error
+        with self.assertRaises(ValueError) as raised:
+            fetch_seed_graph(box(-121, 45, -120, 46))
+        self.assertIs(raised.exception, error)
 
 
 class TestQMXNLibCalculator(unittest.TestCase):
@@ -447,7 +548,7 @@ class TestIntersectionTiles(unittest.TestCase):
                 'geometry', 'tra_score', 'ext:intersection_id', 'ext:degree',
                 'ext:side_count', 'ext:cap_side_count', 'ext:polygon_distance_m',
                 'ext:total_edges', 'ext:connect_edges',
-                'ext:side_roles', 'ext:scoring_algorithm_version',
+                'ext:side_roles', 'ext:scoring_algorithm_version', 'ext:extends_beyond_dataset',
             })
             tiles = calculator.create_tiles(self.hull, self.graph, calculator.default_projection)
             expected = average_scores_to_tiles(debug.to_crs(tiles.crs), tiles)
