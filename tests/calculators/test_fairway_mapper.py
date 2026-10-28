@@ -1,4 +1,5 @@
 import os
+from contextlib import ExitStack
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,11 +18,15 @@ from src.calculators.fetch_timing import FetchBudget, FetchBudgetExceeded, Fetch
 class TestFairwayMapper(unittest.TestCase):
     def setUp(self):
         self.hull = box(-120.818, 45.835, -120.814, 45.8382175)
-        self.cache = self.enterContext(tempfile.TemporaryDirectory())
-        self.enterContext(patch.object(settings, 'cache_folder', self.cache))
-        self.enterContext(patch.object(settings, 'use_cache', True))
-        self.enterContext(patch.dict(os.environ, {'FAIRWAY_MAPPER_API_KEY': 'test-secret'}))
-        self.post = self.enterContext(patch('src.calculators.fairway_mapper.requests.post'))
+        # Register cleanup before acquiring resources, including if setUp fails.
+        # TestCase.enterContext is only available starting with Python 3.11.
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
+        self.cache = contexts.enter_context(tempfile.TemporaryDirectory())
+        contexts.enter_context(patch.object(settings, 'cache_folder', self.cache))
+        contexts.enter_context(patch.object(settings, 'use_cache', True))
+        contexts.enter_context(patch.dict(os.environ, {'FAIRWAY_MAPPER_API_KEY': 'test-secret'}))
+        self.post = contexts.enter_context(patch('src.calculators.fairway_mapper.requests.post'))
         self.post.return_value = Mock(status_code=200)
         self.post.return_value.json.return_value = {'elements': []}
 

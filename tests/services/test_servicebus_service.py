@@ -1,4 +1,5 @@
 import unittest
+from contextlib import ExitStack
 import os
 import tempfile
 import zipfile
@@ -15,10 +16,13 @@ class TestServiceBusService(unittest.TestCase):
     @patch('src.services.servicebus_service.Config')
     @patch('src.services.servicebus_service.Core')
     def setUp(self, mock_core, mock_config):
+        # ExitStack + addCleanup also works on the production Python 3.10 runtime.
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
         # Listener behavior is invoked explicitly in these unit tests. Avoid
         # background threads observing a later test's reinitialized singleton.
-        self.enterContext(patch.object(ServiceBusService, '_instance', None))
-        self.enterContext(patch('src.services.servicebus_service.threading.Thread.start'))
+        contexts.enter_context(patch.object(ServiceBusService, '_instance', None))
+        contexts.enter_context(patch('src.services.servicebus_service.threading.Thread.start'))
         # Mock Config
         mock_config.return_value.connection_string = 'mock-connection-string'
         mock_config.return_value.incoming_topic_name = 'mock-incoming-topic'
@@ -34,7 +38,7 @@ class TestServiceBusService(unittest.TestCase):
         # Initialize the service
         self.service = ServiceBusService()
         self.service.storage_service = MagicMock()
-        self.download_root = self.enterContext(tempfile.TemporaryDirectory())
+        self.download_root = contexts.enter_context(tempfile.TemporaryDirectory())
         self.service.config.get_download_folder.return_value = self.download_root
         self.test_message = QueueMessage(
             messageType='mettric-calculation',
