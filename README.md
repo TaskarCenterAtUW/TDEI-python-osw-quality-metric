@@ -183,6 +183,9 @@ deployed queue version, renewal-failure logs, and total job durations before
 increasing concurrency. Increasing concurrency also increases simultaneous API
 requests and scoring workers; keep it within provider quotas and available memory.
 
+For release changes, consumer migration rules, and an importable example, see
+[the intersection scoring migration guide](docs/intersection-scoring-migration.md).
+
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is
 the number of assigned polygons (including any whose scoring failed). Assignment

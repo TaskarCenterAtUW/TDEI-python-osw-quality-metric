@@ -3,7 +3,11 @@ import os
 import zipfile
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open
+import geopandas as gpd
+import osmnx as ox
+from shapely.geometry import box
 from src.calculators import QMXNLibCalculator, QMFixedCalculator
 from src.calculators.qm_calculator import QualityMetricResult
 from src.services.osw_qm_calculator_service import OswQmCalculator
@@ -127,6 +131,53 @@ class TestOswQmCalculator(unittest.TestCase):
                 output_zip = tempfile.NamedTemporaryFile().name
                 self.calculator.zip_folder(temp_folder, output_zip)
                 mock_zipfile.assert_called_once_with(output_zip, 'w')
+
+    def test_serialized_zip_matches_downstream_score_contract(self):
+        tests_dir = Path(__file__).resolve().parents[1]
+        example_path = tests_dir / 'fixtures' / 'consumer_contract' / 'ixn_qm.geojson'
+        example = json.loads(example_path.read_text())
+        tiles = gpd.read_file(example_path)
+        # Control the polygon scores to cover edge cases deterministically;
+        # aggregation, GeoJSON writing, and service packaging remain real.
+        polygons = []
+        for tile_index, count in [(0, 1), (1, 1), (2, 3), (3, 1)]:
+            x, y, _, _ = tiles.geometry.iloc[tile_index].bounds
+            for offset in range(count):
+                polygons.append(box(x + .001 + offset * .002, y + .002,
+                                    x + .002 + offset * .002, y + .003))
+        scores = gpd.GeoDataFrame({
+            'tra_score': [0., 1., 0., 1., -1., -1.],
+            'total_edges': [6, 6, 6, 10, -1, -1],
+            'connect_edges': [0, 6, 0, 10, -1, -1],
+        }, geometry=polygons, crs=4326)
+        graph = ox.load_graphml(tests_dir / 'xnqm' / 'inputs' / 'p13_seed.graphml')
+        with tempfile.TemporaryDirectory() as folder:
+            input_path = self.make_input_zip(folder)
+            tile_path = os.path.join(folder, 'supplied_tiles.geojson')
+            tiles[['geometry']].to_file(tile_path, driver='GeoJSON')
+            output_path = os.path.join(folder, 'output.zip')
+            for debug in [False, True]:
+                with self.subTest(debug=debug), \
+                        patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=graph), \
+                        patch.object(QMXNLibCalculator, 'score_intersections', return_value=scores):
+                    service = OswQmCalculator(cores_to_use=1, debug_intersection_polygons=debug)
+                    service.calculate_quality_metric(input_path, ['ixn'], output_path, ixn_file=tile_path)
+                    with zipfile.ZipFile(output_path) as archive:
+                        expected_files = {'ixn_qm.geojson'}
+                        if debug:
+                            expected_files.add('ixn_qm_intersection_scores.geojson')
+                            diagnostics = json.loads(archive.read('ixn_qm_intersection_scores.geojson'))
+                            self.assertEqual(len(diagnostics['features']), 6)
+                            for feature in diagnostics['features']:
+                                self.assertEqual(feature['properties']['ext:scoring_algorithm_version'],
+                                                 'intersection-approaches-v1')
+                        self.assertEqual(set(archive.namelist()), expected_files)
+                        output = json.loads(archive.read('ixn_qm.geojson'))
+                self.assertEqual(output['type'], 'FeatureCollection')
+                self.assertEqual([f['properties'] for f in output['features']],
+                                 [f['properties'] for f in example['features']])
+                restored = gpd.GeoDataFrame.from_features(output, crs=4326)
+                self.assertTrue(restored.geom_equals_exact(tiles.geometry, tolerance=1e-10).all())
 
     @patch('src.services.osw_qm_calculator_service.zipfile.ZipFile')
     @patch('os.walk')
