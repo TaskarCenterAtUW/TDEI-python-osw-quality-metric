@@ -99,6 +99,25 @@ To run a single test use
 
 ```
 
+## Queue result delivery
+
+A request is complete only after its success or failure response is published.
+Response serialization/publishing exceptions propagate to the queue worker so it
+can abandon/redeliver the request. A successfully reported calculation failure
+completes normally; it does not trigger a calculation retry. Delivery failures
+are logged as `status=response_delivery_failed`, and a failed success notification
+is never converted into a calculation-failure notification within that attempt.
+
+Redelivery reruns the job. Each attempt uses a separate local directory and uploads
+to `qm-<jobId>-<attemptId>-output.zip`, preventing concurrent deliveries from sharing
+files or overwriting an earlier uploaded result. Consumers must use the returned
+`qm_dataset_url` rather than reconstructing its filename. The response keeps the
+original `messageId`; consumers should deduplicate by that ID. This is at-least-once
+delivery, not an exactly-once transaction: uncertain sends can produce duplicate
+responses, and retries can leave additional remote artifacts. Queue retry limits
+and dead-letter handling still apply. The verified Azure worker is
+`python_ms_core` 0.0.26; check the deployed worker's failure/settlement behavior.
+
 # Run the metrics locally
 - Use [test.py](./test.py) to run the metrics on any dataset locally.
 

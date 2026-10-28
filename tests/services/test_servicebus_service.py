@@ -7,6 +7,7 @@ from src.services.servicebus_service import ServiceBusService
 from src.models.quality_request import RequestData, QualityRequest
 from src.models.quality_response import QualityMetricResponse
 from python_ms_core.core.queue.models.queue_message import QueueMessage
+from python_ms_core.core.topic.azure_topic import AzureTopic
 
 
 class TestServiceBusService(unittest.TestCase):
@@ -32,6 +33,8 @@ class TestServiceBusService(unittest.TestCase):
         # Initialize the service
         self.service = ServiceBusService()
         self.service.storage_service = MagicMock()
+        self.download_root = self.enterContext(tempfile.TemporaryDirectory())
+        self.service.config.get_download_folder.return_value = self.download_root
         self.test_message = QueueMessage(
             messageType='mettric-calculation',
             messageId='message-id-from-msg',
@@ -210,10 +213,68 @@ class TestServiceBusService(unittest.TestCase):
 
     @patch('src.services.servicebus_service.logger')
     def test_send_response_failure(self, mock_logger):
-        self.service.send_response(self.test_message)
+        with self.assertRaisesRegex(TypeError, 'asdict'):
+            self.service.send_response(self.test_message)
 
         # Assertions
         mock_logger.error.assert_called_with('Failed to send response for message message-id-from-msg with error asdict() should be called on dataclass instances')
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_response_delivery_failure_reaches_queue_without_false_failure_response(self, calculator):
+        publisher = self.service.core.get_topic.return_value.publish
+        publisher.side_effect = RuntimeError('Response transport unavailable')
+        self.service.storage_service.upload_local_file.return_value = 'https://example.com/output.zip'
+        # Use the installed worker's real callback adapter, with only external
+        # calculation/storage/publishing mocked. Failure must trigger redelivery.
+        worker = object.__new__(AzureTopic)
+        for calculation_error in [None, RuntimeError('Calculation failed')]:
+            with self.subTest(calculation_error=calculation_error):
+                publisher.reset_mock()
+                calculator.return_value.calculate_quality_metric.side_effect = calculation_error
+                with self.assertLogs('QualityMetricService', level='INFO') as logs:
+                    result = worker.internal_callback(self.test_message.__dict__, self.service.process_message)
+                self.assertFalse(result['success'])
+                self.assertIn('Response transport unavailable', result['error'])
+                publisher.assert_called_once()
+                response = publisher.call_args.kwargs['data']
+                self.assertEqual(response.messageId, self.test_message.messageId)
+                self.assertEqual(response.data['success'], calculation_error is None)
+                self.assertTrue(any('status=response_delivery_failed' in line for line in logs.output))
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_redelivery_uses_isolated_files_and_outputs_with_stable_message_id(self, calculator):
+        publisher = self.service.core.get_topic.return_value.publish
+        publisher.side_effect = [RuntimeError('Response transport unavailable'), None]
+        uploads = {}
+
+        def upload(local_path, remote_path):
+            self.assertNotIn(remote_path, uploads, 'A retry must not collide with an existing blob')
+            uploads[remote_path] = local_path
+            return 'https://example.com/' + remote_path.lstrip('/')
+
+        self.service.storage_service.upload_local_file.side_effect = upload
+        with self.assertRaisesRegex(RuntimeError, 'Response transport unavailable'):
+            self.service.process_message(self.test_message)
+        self.service.process_message(self.test_message)
+        self.assertEqual(len(uploads), 2)
+        self.assertEqual(len(set(uploads.values())), 2)
+        downloads = self.service.storage_service.download_remote_file.call_args_list
+        self.assertNotEqual(downloads[0].args[1], downloads[1].args[1])
+        responses = [call.kwargs['data'] for call in publisher.call_args_list]
+        self.assertEqual([response.messageId for response in responses], [self.test_message.messageId] * 2)
+        self.assertTrue(all(response.data['success'] for response in responses))
+        self.assertNotEqual(responses[0].data['qm_dataset_url'], responses[1].data['qm_dataset_url'])
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_reported_calculation_failure_is_a_completed_queue_callback(self, calculator):
+        calculator.return_value.calculate_quality_metric.side_effect = RuntimeError('Calculation failed')
+        worker = object.__new__(AzureTopic)
+        result = worker.internal_callback(self.test_message.__dict__, self.service.process_message)
+        self.assertTrue(result['success'])
+        publisher = self.service.core.get_topic.return_value.publish
+        publisher.assert_called_once()
+        self.assertFalse(publisher.call_args.kwargs['data'].data['success'])
+        self.service.storage_service.upload_local_file.assert_not_called()
 
     def test_get_directory_path(self):
         url = 'https://example.com/osw/test_upload/df/fff/500mb_file.zip'
