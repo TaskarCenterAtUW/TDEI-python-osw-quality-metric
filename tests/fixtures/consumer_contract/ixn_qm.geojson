@@ -1,0 +1,30 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"tra_score": 0.0, "ext:intersection_count": 1, "ext:scoring_algorithm_version": "intersection-approaches-v2"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-122.00, 47.00], [-121.99, 47.00], [-121.99, 47.01], [-122.00, 47.01], [-122.00, 47.00]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"tra_score": 1.0, "ext:intersection_count": 1, "ext:scoring_algorithm_version": "intersection-approaches-v2"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-121.98, 47.00], [-121.97, 47.00], [-121.97, 47.01], [-121.98, 47.01], [-121.98, 47.00]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"tra_score": 0.5, "ext:intersection_count": 3, "ext:scoring_algorithm_version": "intersection-approaches-v2"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-121.96, 47.00], [-121.95, 47.00], [-121.95, 47.01], [-121.96, 47.01], [-121.96, 47.00]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"tra_score": -1.0, "ext:intersection_count": 1, "ext:scoring_algorithm_version": "intersection-approaches-v2"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-121.94, 47.00], [-121.93, 47.00], [-121.93, 47.01], [-121.94, 47.01], [-121.94, 47.00]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"tra_score": -1.0, "ext:intersection_count": 0, "ext:scoring_algorithm_version": "intersection-approaches-v2"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-121.92, 47.00], [-121.91, 47.00], [-121.91, 47.01], [-121.92, 47.01], [-121.92, 47.00]]]}
+    }
+  ]
+}

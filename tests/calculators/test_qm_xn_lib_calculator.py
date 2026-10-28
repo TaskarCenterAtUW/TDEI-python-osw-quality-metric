@@ -1,9 +1,11 @@
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch, MagicMock
 from src.calculators.qm_xn_lib_calculator import (
-    QMXNLibCalculator, SCORING_ALGORITHM_VERSION, fetch_seed_graph, seed_graph_for_tiles,
+    QMXNLibCalculator, SCORING_ALGORITHM_VERSION, fetch_seed_graph, seed_graph_for_tiles, main,
 )
 from src.calculators.intersection_polygons import create_intersection_polygons
 from src.calculators.qm_calculator import QualityMetricResult
@@ -39,8 +41,9 @@ PINCHED_CELL = wkt.loads(
 
 
 class TestBoundarySeedGraph(unittest.TestCase):
+    @patch('src.calculators.qm_xn_lib_calculator.download_seed_network')
     @patch('osmnx._overpass._download_overpass_network')
-    def test_boundary_t_keeps_three_approaches_and_original_tile_geometries(self, download):
+    def test_boundary_t_keeps_three_approaches_and_original_tile_geometries(self, original_download, download):
         # Goldendale's failure pattern: a junction just inside the northern
         # boundary, with the north and west road endpoints outside the hull.
         positions = {
@@ -63,6 +66,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
             {'type': 'way', 'id': 4, 'nodes': [3, 4], 'tags': {'highway': 'residential'}},
         ]}
         download.return_value = [response]
+        original_download.return_value = [response]
         hull = box(-120.818, 45.835, -120.814, 45.8382175)
         old_graph = ox.graph_from_polygon(
             hull, custom_filter=SEED_CUSTOM_FILTER, simplify=True, retain_all=True,
@@ -70,7 +74,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
         download.reset_mock()
         graph = fetch_seed_graph(hull)
         download.assert_called_once()
-        self.assertEqual(download.call_args.args[1:], ('all', SEED_CUSTOM_FILTER))
+        self.assertEqual(download.call_args.args[1:], (SEED_CUSTOM_FILTER,))
         self.assertEqual(set(old_graph.neighbors(48719999)), {3})
         self.assertEqual(set(graph.neighbors(48719999)), {1, 2, 3})
         footprint = gpd.GeoSeries([hull], crs=4326).to_crs(32610).iloc[0]
@@ -119,7 +123,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
             self.assertEqual(debug['ext:intersection_id'].tolist(), ['48719999'])
             self.assertEqual(debug['ext:degree'].tolist(), [3])
 
-    @patch('src.calculators.qm_xn_lib_calculator._overpass._download_overpass_network')
+    @patch('src.calculators.qm_xn_lib_calculator.download_seed_network')
     def test_fetch_preserves_empty_network_handling_and_propagates_other_errors(self, fetch):
         for error in [
             InsufficientResponseError('No matching roads'),
@@ -223,34 +227,70 @@ class TestQMXNLibCalculator(unittest.TestCase):
         self.assertIn('--intersection-distance', result.stdout)
         self.assertNotIn('--mode', result.stdout)
 
-    def test_main_without_polygon(self):
-        with tempfile.NamedTemporaryFile(suffix='.geojson') as edges_file, \
-                tempfile.NamedTemporaryFile(suffix='.geojson') as output_file:
-            dummy_geojson = {
-                'type': 'FeatureCollection',
-                'features': []
-            }
-
-            edges_file.write(json.dumps(dummy_geojson).encode())
-            edges_file.flush()
-
+    def test_cli_empty_input_exits_nonzero_without_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            edges_path = os.path.join(folder, 'empty.edges.geojson')
+            output_path = os.path.join(folder, 'scores.geojson')
+            with open(edges_path, 'w') as stream:
+                json.dump({'type': 'FeatureCollection', 'features': []}, stream)
             result = run(
-                [
-                    sys.executable,
-                    '-m',
-                    'src.calculators.qm_xn_lib_calculator',
-                    edges_file.name,
-                    output_file.name,
-                ],
-                stdout=PIPE,
-                stderr=PIPE,
-                text=True,
+                [sys.executable, '-m', 'src.calculators.qm_xn_lib_calculator', edges_path, output_path],
+                stdout=PIPE, stderr=PIPE, text=True, timeout=30,
             )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('success=False', result.stdout)
+            self.assertFalse(os.path.exists(output_path))
 
-            if result.returncode != 0:
-                print('Error:', result.stderr)
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph')
+    def test_cli_success_with_saved_graph_writes_valid_scores(self, fetch):
+        fetch.return_value = ox.load_graphml(os.path.join(INPUTS, 'p13_seed.graphml'))
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            stdout = StringIO()
+            with redirect_stdout(stdout), patch(
+                'requests.sessions.Session.request', side_effect=AssertionError('Unexpected network access'),
+            ):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path,
+                                  '--debug-intersection-polygons'])
+            self.assertEqual(exit_code, 0, stdout.getvalue())
+            self.assertIn('success=True', stdout.getvalue())
+            fetch.assert_called_once()
+            output = gpd.read_file(output_path)
+            self.assertFalse(output.empty)
+            self.assertEqual(output.crs.to_epsg(), 4326)
+            self.assertTrue(output.geometry.is_valid.all())
+            self.assertTrue((output.tra_score.between(0, 1) | (output.tra_score == -1)).all())
+            self.assertTrue((output['ext:intersection_count'] > 0).any())
+            debug = gpd.read_file(os.path.join(folder, 'scores_intersection_scores.geojson'))
+            self.assertFalse(debug.empty)
+            self.assertTrue(debug.tra_score.between(0, 1).all())
 
-            self.assertEqual(result.returncode, 0)
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph',
+           side_effect=RuntimeError('Fairway Mapper unavailable'))
+    def test_cli_fetch_failure_returns_failure_without_output(self, fetch):
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path])
+            self.assertEqual(exit_code, 1)
+            self.assertIn('success=False', stdout.getvalue())
+            self.assertIn('Fairway Mapper unavailable', stdout.getvalue())
+            self.assertFalse(os.path.exists(output_path))
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=None)
+    def test_cli_valid_no_road_result_with_supplied_tiles_is_successful(self, fetch):
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            tile_path = os.path.join(INPUTS, 'p13_polygon.geojson')
+            with redirect_stdout(StringIO()):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path, tile_path])
+            self.assertEqual(exit_code, 0)
+            output = gpd.read_file(output_path)
+            self.assertEqual(len(output), len(gpd.read_file(tile_path)))
+            self.assertFalse(output.empty)
+            self.assertTrue((output.tra_score == -1).all())
+            self.assertTrue((output['ext:intersection_count'] == 0).all())
 
     @patch('src.calculators.qm_xn_lib_calculator.nx.Graph')
     def test_graph_from_gdf_multilinestring(self, mock_graph):
@@ -484,12 +524,56 @@ class TestIntersectionTiles(unittest.TestCase):
         cells = tiles_for_polygon(self.hull, None, crs="EPSG:32610", fallback=FallbackGrid()).fallback
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "ixn_qm.geojson")
-            result = QMXNLibCalculator(self.edges, out, partition_count=1).calculate_quality_metric()
+            with self.assertLogs('src.calculators.qm_xn_lib_calculator', level='WARNING') as logs:
+                result = QMXNLibCalculator(self.edges, out, partition_count=1).calculate_quality_metric()
             self.assertTrue(result.success, result.message)
             scored = gpd.read_file(out)
         self.assertEqual(len(scored), len(cells))
         self.assertTrue((scored.tra_score == -1).all())
         self.assertTrue((scored['ext:intersection_count'] == 0).all())
+        self.assertIn('generated fallback tiles', logs.output[0])
+        self.assertIn(self.edges, logs.output[0])
+        self.assertIn('tra_score=-1 (unavailable)', logs.output[0])
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph')
+    def test_missing_roads_warn_and_preserve_supplied_tiles(self, fetch):
+        for no_roads in [InsufficientResponseError('No matching roads'), None, nx.MultiDiGraph()]:
+            with self.subTest(no_roads=no_roads), tempfile.TemporaryDirectory() as tmp:
+                fetch.side_effect = no_roads if isinstance(no_roads, Exception) else None
+                fetch.return_value = no_roads
+                tile_path = os.path.join(tmp, 'supplied.geojson')
+                tiles = gpd.GeoDataFrame(geometry=[self.hull], crs=4326)
+                tiles.to_file(tile_path, driver='GeoJSON')
+                output_path = os.path.join(tmp, 'scores.geojson')
+                calculator = QMXNLibCalculator(self.edges, output_path, tile_path, partition_count=1)
+                with self.assertLogs('src.calculators.qm_xn_lib_calculator', level='WARNING') as logs:
+                    result = calculator.calculate_quality_metric()
+                self.assertTrue(result.success, result.message)
+                scored = gpd.read_file(output_path)
+                self.assertEqual(scored.tra_score.tolist(), [-1])
+                self.assertEqual(scored['ext:intersection_count'].tolist(), [0])
+                self.assertTrue(scored.geom_equals_exact(tiles.geometry, tolerance=1e-12).all())
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn('No qualifying OSM roads', logs.output[0])
+                self.assertIn('all supplied tiles', logs.output[0])
+                self.assertIn(self.edges, logs.output[0])
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph_with_retry')
+    def test_fetch_errors_with_supplied_tiles_are_not_reported_as_missing_roads(self, fetch):
+        from requests.exceptions import HTTPError, Timeout
+        for error in [HTTPError('Authentication failed'), Timeout('Retries exhausted'),
+                      ValueError('Fairway Mapper returned an invalid OSM response')]:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as tmp:
+                fetch.side_effect = error
+                tile_path = os.path.join(tmp, 'supplied.geojson')
+                gpd.GeoDataFrame(geometry=[self.hull], crs=4326).to_file(tile_path, driver='GeoJSON')
+                output_path = os.path.join(tmp, 'scores.geojson')
+                calculator = QMXNLibCalculator(self.edges, output_path, tile_path, partition_count=1)
+                with self.assertNoLogs('src.calculators.qm_xn_lib_calculator', level='WARNING'):
+                    result = calculator.calculate_quality_metric()
+                self.assertFalse(result.success)
+                self.assertIn(str(error), result.message)
+                self.assertFalse(os.path.exists(output_path))
 
     def test_a_hull_with_no_road_gets_only_fallback_cells(self):
         calculator = QMXNLibCalculator(self.edges, "unused.geojson")
@@ -509,11 +593,11 @@ class TestIntersectionTiles(unittest.TestCase):
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
         self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.0)
 
-    def test_a_multipart_tile_is_scored_on_its_largest_part(self):
+    def test_direct_multipolygon_call_scores_largest_part(self):
         calculator = QMXNLibCalculator("unused.geojson", "unused.geojson")
-        tile = MultiPolygon([box(200, 0, 210, 10), box(0, 0, 100, 100)])
+        polygon = MultiPolygon([box(200, 0, 210, 10), box(0, 0, 100, 100)])
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
-        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.1)
+        self.assertEqual(calculator.get_measures_from_polygon(polygon, edges)["tra_score"], 0.1)
 
     @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
     def test_debug_polygon_scores_are_optional_and_average_back_to_output(self, fetch):
@@ -538,6 +622,9 @@ class TestIntersectionTiles(unittest.TestCase):
             self.assertTrue((debug['ext:total_edges'] == debug['ext:degree'] * (debug['ext:degree'] + 1) / 2).all())
             self.assertTrue((debug['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
             self.assertTrue((scored['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
+            self.assertTrue(debug['ext:cluster_diameter_m'].between(0, 20).all())
+            self.assertTrue((debug['ext:cluster_member_count'] >= 1).all())
+            self.assertTrue(debug['ext:cluster_members_covered'].all())
             for _, row in debug.iterrows():
                 roles = row['ext:side_roles'].split(',')
                 self.assertEqual(len(roles), row['ext:side_count'])
@@ -549,6 +636,7 @@ class TestIntersectionTiles(unittest.TestCase):
                 'ext:side_count', 'ext:cap_side_count', 'ext:polygon_distance_m',
                 'ext:total_edges', 'ext:connect_edges',
                 'ext:side_roles', 'ext:scoring_algorithm_version', 'ext:extends_beyond_dataset',
+                'ext:cluster_diameter_m', 'ext:cluster_member_count', 'ext:cluster_members_covered',
             })
             tiles = calculator.create_tiles(self.hull, self.graph, calculator.default_projection)
             expected = average_scores_to_tiles(debug.to_crs(tiles.crs), tiles)

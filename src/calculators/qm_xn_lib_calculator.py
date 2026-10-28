@@ -1,4 +1,8 @@
 from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.fairway_mapper import download_seed_network
+from src.calculators import osmnx_compat
+from src.calculators.fetch_timing import FetchBudget, FetchBudgetExceeded
+from email.utils import parsedate_to_datetime
 from src.calculators.intersection_polygons import (
     DEFAULT_INTERSECTION_DISTANCE, DIAGNOSTIC_PROPERTY_NAMES,
     create_intersection_polygons, average_scores_to_tiles,
@@ -23,27 +27,25 @@ import numpy as np
 import pandas as pd
 import os
 import osmnx as ox
-from osmnx import _overpass
-from osmnx.graph import _create_graph
-import re
 import time
 from requests.exceptions import ConnectionError, HTTPError, Timeout
-from osmnx._errors import ResponseStatusCodeError
 
 logger = logging.getLogger(__name__)
-SCORING_ALGORITHM_VERSION = "intersection-approaches-v1"
+SCORING_ALGORITHM_VERSION = "intersection-approaches-v2"
 
 
-def fetch_seed_graph(polygon):
+def fetch_seed_graph(polygon, *, budget=None):
     """Fetch one OSM snapshot, preserving boundary approaches for polygons.
 
     Follow OSMnx 2.0.7's graph_from_polygon pipeline with Flagstones' filter,
     simplify=True and retain_all=True. Keep its original 500 m buffer trimming
     BEFORE simplification; only the final hull trim retains outside neighbors.
     A strict final trim can then recover the original tile seed graph exactly.
-    These two private OSMnx helpers let both graphs share one download. Recheck
-    this pipeline against graph_from_polygon when upgrading the pinned OSMnx.
+    Both graphs share one Fairway Mapper download. Private helpers are isolated
+    in osmnx_compat; recheck this pipeline against graph_from_polygon on upgrades.
     """
+    budget = budget if budget is not None else FetchBudget()
+    budget.remaining()
     try:
         if not polygon.is_valid:
             raise ValueError("The geometry of `polygon` is invalid.")
@@ -53,13 +55,14 @@ def fetch_seed_graph(polygon):
         buffered, _ = ox.projection.project_geometry(
             projected.buffer(500), crs=crs, to_latlong=True,
         )
-        responses = _overpass._download_overpass_network(buffered, 'all', SEED_CUSTOM_FILTER)
-        graph = _create_graph(responses, 'all' in ox.settings.bidirectional_network_types)
+        responses = download_seed_network(buffered, SEED_CUSTOM_FILTER, budget=budget)
+        graph = osmnx_compat.graph_from_responses(responses)
         graph = ox.truncate.truncate_graph_polygon(graph, buffered, truncate_by_edge=False)
         graph = ox.simplification.simplify_graph(graph)
         boundary_graph = ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=True)
         counts = ox.stats.count_streets_per_node(graph, nodes=boundary_graph.nodes)
         nx.set_node_attributes(boundary_graph, counts, 'street_count')
+        budget.remaining()
         return boundary_graph
     except InsufficientResponseError:
         raise
@@ -77,31 +80,65 @@ def seed_graph_for_tiles(graph, polygon):
     return ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=False)
 
 
-def fetch_seed_graph_with_retry(polygon):
-    """Retry transient Overpass failures without treating them as an empty graph."""
-    for attempt in range(3):
+def retry_after_seconds(response):
+    """Read Retry-After seconds or HTTP-date, ignoring malformed values."""
+    if response is None:
+        return 0.0
+    value = response.headers.get('Retry-After')
+    if value is None:
+        return 0.0
+    try:
+        delay = float(value)
+    except (ValueError, TypeError):
         try:
-            return fetch_seed_graph(polygon)
-        except (ConnectionError, Timeout, HTTPError, ResponseStatusCodeError) as exc:
-            if isinstance(exc, HTTPError):
-                status = exc.response.status_code if exc.response is not None else None
-            elif isinstance(exc, ResponseStatusCodeError):
-                # OSMnx discards the response object and embeds status in its message.
-                match = re.search(r"responded: (\d{3})\b", str(exc))
-                status = int(match.group(1)) if match else None
-            else:
-                status = None
-            transient = isinstance(exc, (ConnectionError, Timeout)) or status in {
-                429, 500, 502, 503, 504,
-            }
-            if not transient or attempt == 2:
+            delay = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return 0.0
+    return max(0.0, delay) if np.isfinite(delay) else 0.0
+
+
+def fetch_seed_graph_with_retry(polygon):
+    """Retry within one time budget shared by all requests and graph attempts."""
+    budget = FetchBudget()
+    attempts = 0
+    outcome = 'failed'
+    try:
+        for attempt in range(budget.policy.max_attempts):
+            budget.remaining()
+            attempts += 1
+            try:
+                graph = fetch_seed_graph(polygon, budget=budget)
+                budget.remaining()
+                outcome = 'success'
+                return graph
+            except InsufficientResponseError:
+                budget.remaining()
+                outcome = 'no_roads'
                 raise
-            delay = 10 * 2 ** attempt
-            logger.warning(
-                "Temporary Overpass failure (%s); retrying in %s seconds (attempt %s/3)",
-                type(exc).__name__, delay, attempt + 2,
-            )
-            time.sleep(delay)
+            except (ConnectionError, Timeout, HTTPError) as exc:
+                response = exc.response if isinstance(exc, HTTPError) else None
+                status = response.status_code if response is not None else None
+                transient = isinstance(exc, (ConnectionError, Timeout)) or status in {
+                    429, 500, 502, 503, 504,
+                }
+                if not transient or attempts == budget.policy.max_attempts:
+                    raise
+                remaining = budget.remaining()
+                delay = max(budget.policy.retry_backoff * 2 ** attempt, retry_after_seconds(response))
+                if delay >= remaining:
+                    raise FetchBudgetExceeded(
+                        'Fairway Mapper retry delay exceeds the remaining fetch time budget'
+                    ) from exc
+                logger.warning(
+                    'Temporary Fairway Mapper failure (%s, HTTP %s); retrying in %.1fs '
+                    '(attempt %d/%d, elapsed %.1fs, remaining %.1fs)',
+                    type(exc).__name__, status, delay, attempts + 1,
+                    budget.policy.max_attempts, budget.elapsed(), remaining,
+                )
+                time.sleep(delay)
+    finally:
+        logger.info('Fairway Mapper fetch finished: status=%s attempts=%d elapsed=%.3fs budget=%.1fs',
+                    outcome, attempts, budget.elapsed(), budget.policy.budget_seconds)
 
 
 class QMXNLibCalculator(QMCalculator):
@@ -216,8 +253,12 @@ class QMXNLibCalculator(QMCalculator):
         return stats
     
     def get_measures_from_polygon(self, polygon, gdf, side_roles=None):
-        # A multipart tile scores its largest part: one tile stays one output
-        # row, and tile_tra_score walks one exterior ring.
+        """Score connectivity within an intersection polygon.
+
+        The scoring pipeline supplies single Polygons. For compatibility with
+        direct callers, a MultiPolygon scores only its largest component.
+        Any supplied side_roles must describe that component's exterior ring.
+        """
         if isinstance(polygon, MultiPolygon):
             polygon = max(polygon.geoms, key=lambda part: part.area)
         # crop gdf to the polygon
@@ -290,6 +331,15 @@ class QMXNLibCalculator(QMCalculator):
             except InsufficientResponseError:
                 graph = None
 
+            if graph is None or graph.number_of_edges() == 0:
+                logger.warning(
+                    "No qualifying OSM roads are available for %s under the current road/access filter. "
+                    "Cannot generate intersection scoring polygons; all %s tiles will have "
+                    "tra_score=-1 (unavailable).",
+                    self.edges_file_path,
+                    "supplied" if self.polygon_file_path else "generated fallback",
+                )
+
             if self.polygon_file_path:
                 tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
@@ -339,17 +389,24 @@ class QMXNLibCalculator(QMCalculator):
             return QualityMetricResult(success=False, message=f'Error: {e}', output_file="")
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    """Run the CLI and return a process exit code reflecting calculation success."""
     parser = argparse.ArgumentParser(description='Average intersection polygon quality scores onto tiles.')
     parser.add_argument('edges_file')
     parser.add_argument('output_file')
     parser.add_argument('tile_file', nargs='?', help='Optional precomputed intersection tiles.')
     parser.add_argument('--intersection-distance', type=float, default=DEFAULT_INTERSECTION_DISTANCE)
     parser.add_argument('--debug-intersection-polygons', action='store_true')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     calculator = QMXNLibCalculator(
         args.edges_file, args.output_file, args.tile_file,
         intersection_distance=args.intersection_distance,
         debug_intersection_polygons=args.debug_intersection_polygons,
     )
-    print(calculator.calculate_quality_metric())
+    result = calculator.calculate_quality_metric()
+    print(result)
+    return 0 if result.success else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

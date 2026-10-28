@@ -1,5 +1,7 @@
 """Local intersection scoring polygons and aggregation onto existing tiles."""
 
+from itertools import combinations
+
 import geopandas as gpd
 import networkx as nx
 import numpy as np
@@ -15,6 +17,7 @@ MAX_DIRECTION_GAP_DEGREES = 135.0
 POLYGON_COLUMNS = [
     "intersection_id", "degree", "side_count", "cap_side_count", "polygon_distance_m",
     "side_roles", "extends_beyond_dataset",
+    "cluster_diameter_m", "cluster_member_count", "cluster_members_covered",
 ]
 DIAGNOSTIC_PROPERTY_NAMES = {
     column: f"ext:{column}"
@@ -130,6 +133,32 @@ def polygon_side_roles(polygon, center, directions, approach_count, distance):
     return ",".join("approach" if index < approach_count else "cap" for index in matched)
 
 
+def bounded_junction_clusters(adjacency, points, max_diameter):
+    """Merge road-connected groups nearest first, bounding every member pair.
+
+    Canonical node IDs break distance ties, independent of graph insertion order.
+    Unlike connected components, short links cannot transitively grow an
+    arbitrarily wide cluster. Every merge preserves road connectivity.
+    """
+    groups = {node: {node} for node in adjacency}
+    owner = {node: node for node in adjacency}
+    links = [tuple(sorted((u, v), key=str)) for u, v in adjacency.edges]
+    links.sort(key=lambda pair: (points[pair[0]].distance(points[pair[1]]),
+                                 str(pair[0]), str(pair[1])))
+    for u, v in links:
+        first, second = owner[u], owner[v]
+        if first == second:
+            continue
+        if any(points[a].distance(points[b]) > max_diameter
+               for a in groups[first] for b in groups[second]):
+            continue
+        for node in groups[second]:
+            owner[node] = first
+        groups[first].update(groups.pop(second))
+    return sorted((tuple(sorted(group, key=str)) for group in groups.values()),
+                  key=lambda group: tuple(map(str, group)))
+
+
 def create_intersection_polygons(
     graph, crs, distance=DEFAULT_INTERSECTION_DISTANCE, *, dataset_footprint=None,
 ):
@@ -183,7 +212,10 @@ def create_intersection_polygons(
                 clusters.add_edge(u, v)
 
     records = []
-    for members in nx.connected_components(clusters):
+    # A diameter no larger than the side distance keeps every member within
+    # the polygon's inscribed circle, even for custom distances below 20 m.
+    points = {node: nodes.loc[node].geometry for node in candidates}
+    for members in bounded_junction_clusters(clusters, points, min(CLUSTER_DISTANCE, distance)):
         directions = []
         seen = set()
         for node_id in sorted(members, key=str):
@@ -202,12 +234,20 @@ def create_intersection_polygons(
         polygon_directions, cap_count = add_closing_cap_directions(directions)
         polygon = polygon_from_directions(center, polygon_directions, distance)
         if polygon is not None:
+            members_covered = all(polygon.covers(points[node]) for node in members)
+            if not members_covered:
+                raise ValueError("Intersection polygon does not cover every cluster member")
             records.append({
                 "intersection_id": "|".join(str(node_id) for node_id in sorted(members, key=str)),
                 "degree": len(directions),
                 "side_count": len(polygon.exterior.coords) - 1,
                 "cap_side_count": cap_count,
                 "polygon_distance_m": float(distance),
+                "cluster_diameter_m": max(
+                    (points[a].distance(points[b]) for a, b in combinations(members, 2)), default=0.0,
+                ),
+                "cluster_member_count": len(members),
+                "cluster_members_covered": members_covered,
                 "side_roles": polygon_side_roles(
                     polygon, center, polygon_directions, len(directions), distance,
                 ),
