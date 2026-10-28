@@ -1,38 +1,175 @@
 from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.fairway_mapper import download_seed_network
+from src.calculators import osmnx_compat
+from src.calculators.fetch_timing import FetchBudget, FetchBudgetExceeded
+from email.utils import parsedate_to_datetime
+from src.calculators.intersection_polygons import (
+    DEFAULT_INTERSECTION_DISTANCE, DIAGNOSTIC_PROPERTY_NAMES,
+    create_intersection_polygons, average_scores_to_tiles,
+)
+import argparse
 import geopandas as gpd
-import sys
 import warnings
 import networkx as nx
-import traceback
-import geonetworkx as gnx
-import osmnx as ox
+import logging
+from pathlib import Path
+from flagstones import FallbackGrid
+from flagstones.clip import repair_reprojected
+from flagstones.crs import utm_crs_for
+from flagstones.geo import tiles_to_geodataframe
+from flagstones.osm import InsufficientResponseError, SEED_CUSTOM_FILTER, tiles_for_polygon
+from flagstones.pipeline import TILE_ALGORITHM_VERSION
 import dask_geopandas 
-from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon
-from shapely.ops import voronoi_diagram
+from shapely import Point, LineString, MultiLineString, Polygon, MultiPolygon, GeometryCollection
+from shapely.geometry.base import BaseGeometry
 import itertools
 import numpy as np
 import pandas as pd
 import os
+import osmnx as ox
+import time
+from requests.exceptions import ConnectionError, HTTPError, Timeout
+
+logger = logging.getLogger(__name__)
+SCORING_ALGORITHM_VERSION = "intersection-approaches-v2"
+
+
+def fetch_seed_graph(polygon, *, budget=None):
+    """Fetch one OSM snapshot, preserving boundary approaches for polygons.
+
+    Follow OSMnx 2.0.7's graph_from_polygon pipeline with Flagstones' filter,
+    simplify=True and retain_all=True. Keep its original 500 m buffer trimming
+    BEFORE simplification; only the final hull trim retains outside neighbors.
+    A strict final trim can then recover the original tile seed graph exactly.
+    Both graphs share one Fairway Mapper download. Private helpers are isolated
+    in osmnx_compat; recheck this pipeline against graph_from_polygon on upgrades.
+    """
+    budget = budget if budget is not None else FetchBudget()
+    budget.remaining()
+    try:
+        if not polygon.is_valid:
+            raise ValueError("The geometry of `polygon` is invalid.")
+        if not isinstance(polygon, (Polygon, MultiPolygon)):
+            raise TypeError("The geometry of `polygon` must be a Polygon or MultiPolygon.")
+        projected, crs = ox.projection.project_geometry(polygon)
+        buffered, _ = ox.projection.project_geometry(
+            projected.buffer(500), crs=crs, to_latlong=True,
+        )
+        responses = download_seed_network(buffered, SEED_CUSTOM_FILTER, budget=budget)
+        graph = osmnx_compat.graph_from_responses(responses)
+        graph = ox.truncate.truncate_graph_polygon(graph, buffered, truncate_by_edge=False)
+        graph = ox.simplification.simplify_graph(graph)
+        boundary_graph = ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=True)
+        counts = ox.stats.count_streets_per_node(graph, nodes=boundary_graph.nodes)
+        nx.set_node_attributes(boundary_graph, counts, 'street_count')
+        budget.remaining()
+        return boundary_graph
+    except InsufficientResponseError:
+        raise
+    except ValueError as err:
+        # Preserve Flagstones' empty-network handling without hiding other errors.
+        if "Found no graph nodes within the requested polygon" in str(err):
+            raise InsufficientResponseError(str(err)) from err
+        raise
+
+
+def seed_graph_for_tiles(graph, polygon):
+    """Recover the original strict hull trim without mutating the scoring graph."""
+    if graph is None or graph.number_of_nodes() == 0:
+        return graph
+    return ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=False)
+
+
+def retry_after_seconds(response):
+    """Read Retry-After seconds or HTTP-date, ignoring malformed values."""
+    if response is None:
+        return 0.0
+    value = response.headers.get('Retry-After')
+    if value is None:
+        return 0.0
+    try:
+        delay = float(value)
+    except (ValueError, TypeError):
+        try:
+            delay = parsedate_to_datetime(value).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return 0.0
+    return max(0.0, delay) if np.isfinite(delay) else 0.0
+
+
+def fetch_seed_graph_with_retry(polygon):
+    """Retry within one time budget shared by all requests and graph attempts."""
+    budget = FetchBudget()
+    attempts = 0
+    outcome = 'failed'
+    try:
+        for attempt in range(budget.policy.max_attempts):
+            budget.remaining()
+            attempts += 1
+            try:
+                graph = fetch_seed_graph(polygon, budget=budget)
+                budget.remaining()
+                outcome = 'success'
+                return graph
+            except InsufficientResponseError:
+                budget.remaining()
+                outcome = 'no_roads'
+                raise
+            except (ConnectionError, Timeout, HTTPError) as exc:
+                response = exc.response if isinstance(exc, HTTPError) else None
+                status = response.status_code if response is not None else None
+                transient = isinstance(exc, (ConnectionError, Timeout)) or status in {
+                    429, 500, 502, 503, 504,
+                }
+                if not transient or attempts == budget.policy.max_attempts:
+                    raise
+                remaining = budget.remaining()
+                delay = max(budget.policy.retry_backoff * 2 ** attempt, retry_after_seconds(response))
+                if delay >= remaining:
+                    raise FetchBudgetExceeded(
+                        'Fairway Mapper retry delay exceeds the remaining fetch time budget'
+                    ) from exc
+                logger.warning(
+                    'Temporary Fairway Mapper failure (%s, HTTP %s); retrying in %.1fs '
+                    '(attempt %d/%d, elapsed %.1fs, remaining %.1fs)',
+                    type(exc).__name__, status, delay, attempts + 1,
+                    budget.policy.max_attempts, budget.elapsed(), remaining,
+                )
+                time.sleep(delay)
+    finally:
+        logger.info('Fairway Mapper fetch finished: status=%s attempts=%d elapsed=%.3fs budget=%.1fs',
+                    outcome, attempts, budget.elapsed(), budget.policy.budget_seconds)
 
 
 class QMXNLibCalculator(QMCalculator):
-    def __init__(self, edges_file_path:str, output_file_path:str, polygon_file_path:str=None, partition_count:int = os.cpu_count()):
+    def __init__(
+        self, edges_file_path: str, output_file_path: str, polygon_file_path: str = None,
+        partition_count: int = os.cpu_count(), *,
+        intersection_distance: float = DEFAULT_INTERSECTION_DISTANCE,
+        debug_intersection_polygons: bool = False,
+    ):
         """
         Initializes the QMXNLibCalculator class.
 
         Args:
             edges_file_path (str): Path to the file containing the OSW edge data.
             output_file_path (str): Path to where the output quality metric file will be saved.
-            polygon_file_path (str, optional): Path to the intersection polygon file. If not provided, will use the polygon computed from the convex hull of OSW edge data. Defaults to None.
+            polygon_file_path (str, optional): Existing output tiles. Otherwise,
+                tiles are generated over the convex hull of the OSW edges.
+            intersection_distance (float): Polygon side distance in meters.
+            debug_intersection_polygons (bool): Save intermediate polygon scores
+                beside the final output. Disabled by default for production.
         """
         self.edges_file_path = edges_file_path
         self.output_file_path = output_file_path
         self.polygon_file_path = polygon_file_path
         warnings.filterwarnings("ignore")
-        self.default_projection = 'epsg:26910'
+        self.default_projection = None
         self.output_projection = 'epsg:4326'
         self.precision = 1e-5
         self.partition_count = partition_count
+        self.intersection_distance = intersection_distance
+        self.debug_intersection_polygons = debug_intersection_polygons
 
     def add_edges_from_linestring(self, graph, linestring, edge_attrs):
         points = list(linestring.coords)
@@ -50,15 +187,26 @@ class QMXNLibCalculator(QMCalculator):
                     self.add_edges_from_linestring(G, linestring, row.to_dict())
         return G
     
-    def group_G_pts(self, G, poly):
+    def group_G_pts(self, G, poly, side_roles=None):
         P = poly
         node_pts = [Point(x) for x in G.nodes()]
-        boundary = list(P.boundary.coords)
+        boundary = list(P.exterior.coords)
         segments = [LineString([boundary[i], boundary[i + 1]]) for i in range(len(boundary) - 1)]
-        segment_point_map = {index: [] for index in range(len(segments))}
+        if side_roles is None:
+            # Direct callers with a bare polygon retain all-side scoring.
+            roles = ["approach"] * len(segments)
+        else:
+            if not isinstance(side_roles, str):
+                raise ValueError("Polygon side roles must be a comma-separated string")
+            roles = side_roles.split(",")
+            if (len(roles) != len(segments) or "approach" not in roles
+                    or any(role not in {"approach", "cap"} for role in roles)):
+                raise ValueError("Polygon side roles do not match its exterior segments")
+        segment_point_map = {index: [] for index, role in enumerate(roles) if role == "approach"}
         for point in node_pts:
-            for idx, segment in enumerate(segments):
-                if segment.distance(point) < self.precision:
+            # A corner shared with a cap belongs to the actual approach.
+            for idx in segment_point_map:
+                if segments[idx].distance(point) < self.precision:
                     segment_point_map[idx].append((point.x, point.y))
                     break
         return segment_point_map
@@ -66,18 +214,16 @@ class QMXNLibCalculator(QMCalculator):
     def edges_are_connected(self, G, e1_pts, e2_pts):
         for pt1 in e1_pts:
             for pt2 in e2_pts:
-                if nx.has_path(G, pt1, pt2):
+                if pt1 != pt2 and nx.has_path(G, pt1, pt2):
                     return True
         return False
 
     def algorithm_name(self):
         return "QMXNLibCalculator"
 
-    def tile_tra_score(self, G, polygon):
+    def tile_tra_score(self, G, polygon, side_roles=None):
         # assign each point to a polygon line
-        pts_line_map = self.group_G_pts(G, polygon)
-        boundary_nodes = [item for sublist in pts_line_map.values() for item in sublist]
-
+        pts_line_map = self.group_G_pts(G, polygon, side_roles)
         # find all pair of edges
         edge_pairs = list(itertools.combinations_with_replacement(pts_line_map.keys(), 2))
 
@@ -91,72 +237,150 @@ class QMXNLibCalculator(QMCalculator):
                 connected_pairs.append(pair)
         return n_total, n_connected, connected_pairs
 
-    def get_stats(self, polygon, G, gdf):
+    def get_stats(self, polygon, G, gdf, side_roles=None):
         stats = {}
-        undirected_g = nx.Graph(G)
-
         try:
-            n_total, n_connected, connected_pairs = self.tile_tra_score(G, polygon)
+            n_total, n_connected, connected_pairs = self.tile_tra_score(G, polygon, side_roles)
             stats['tra_score'] = n_connected / n_total
+            stats['total_edges'] = n_total
+            stats['connect_edges'] = n_connected
         except Exception as e:
             print(f"Unexpected {e}, {type(e)} with polygon {polygon} when getting number of connected edge pairs")
             #traceback.print_exc()
             stats["tra_score"] = -1
+            stats["total_edges"] = -1
+            stats["connect_edges"] = -1
         return stats
     
-    def get_measures_from_polygon(self, polygon, gdf):
-        if isinstance(polygon, MultiPolygon) and len(polygon.geoms)==1:
-            polygon = polygon.geoms[0]
+    def get_measures_from_polygon(self, polygon, gdf, side_roles=None):
+        """Score connectivity within an intersection polygon.
+
+        The scoring pipeline supplies single Polygons. For compatibility with
+        direct callers, a MultiPolygon scores only its largest component.
+        Any supplied side_roles must describe that component's exterior ring.
+        """
+        if isinstance(polygon, MultiPolygon):
+            polygon = max(polygon.geoms, key=lambda part: part.area)
         # crop gdf to the polygon
         cropped_gdf = gpd.clip(gdf, polygon)
         
         G = self.graph_from_gdf(cropped_gdf)
-        stats = self.get_stats(polygon, G, cropped_gdf)
+        stats = self.get_stats(polygon, G, cropped_gdf, side_roles)
         return stats
     
     def qm_func(self, feature, gdf):
         poly = feature.geometry
         if (poly.geom_type == 'Polygon' or poly.geom_type == 'MultiPolygon'):
-            measures = self.get_measures_from_polygon(poly, gdf)
+            measures = self.get_measures_from_polygon(poly, gdf, feature.get('side_roles'))
+            # The row of a geometry-only frame has the geometry dtype, which
+            # cannot hold a score, and pandas 2 no longer upcasts on enlargement.
+            feature = feature.astype(object)
             feature.loc['tra_score'] = measures['tra_score']
+            feature.loc['total_edges'] = measures.get('total_edges', -1)
+            feature.loc['connect_edges'] = measures.get('connect_edges', -1)
             return feature
         else:
             return feature
     
-    def create_voronoi_diagram(self, G_roads_simplified, bounds):
-        # first thin the nodes
-        gdf_roads_simplified = gnx.graph_edges_to_gdf(G_roads_simplified)
-        voronoi = voronoi_diagram(gdf_roads_simplified.boundary.unary_union, envelope=bounds)
-        voronoi_gdf = gpd.GeoDataFrame({'geometry':voronoi.geoms})
-        voronoi_gdf = voronoi_gdf.set_crs(gdf_roads_simplified.crs)
-        voronoi_gdf_clipped = gpd.clip(voronoi_gdf, bounds)
-        voronoi_gdf_clipped = voronoi_gdf_clipped.to_crs(self.default_projection)
+    def work_crs(self, bounding_polygon: BaseGeometry) -> str:
+        """The UTM zone of the data's centroid, where tiling and scoring run."""
+        centre = bounding_polygon.centroid
+        return utm_crs_for(centre.x, centre.y)
 
-        return voronoi_gdf_clipped
-    
+    def create_tiles(
+        self, bounding_polygon: BaseGeometry, graph: nx.MultiDiGraph | None, crs: str
+    ) -> gpd.GeoDataFrame:
+        """Tiles covering `bounding_polygon`, geometry only, in `crs`.
+
+        `bounding_polygon` is in EPSG:4326. The rows are the intersection
+        tiles over `graph`, then fallback grid cells over the ground they
+        leave. `graph` is None when the hull holds no road, and fallback
+        cells then cover all of it.
+        """
+        tile_set = tiles_for_polygon(bounding_polygon, graph, crs=crs, fallback=FallbackGrid())
+        return tiles_to_geodataframe(tile_set, to_crs=crs)[["geometry"]]
+
+    def score_intersections(self, intersection_gdf, edges_gdf):
+        meta = intersection_gdf.iloc[:0].copy()
+        for column in ["tra_score", "total_edges", "connect_edges"]:
+            meta[column] = pd.Series(dtype="object")
+        if intersection_gdf.empty:
+            return meta
+        if 'side_roles' not in intersection_gdf or intersection_gdf.side_roles.isna().any():
+            raise ValueError("Intersection scoring requires explicit polygon side roles")
+        partitions = max(1, min(self.partition_count, os.cpu_count() or 1, len(intersection_gdf)))
+        df_dask = dask_geopandas.from_geopandas(intersection_gdf, npartitions=partitions)
+        return df_dask.apply(self.qm_func, axis=1, meta=meta, gdf=edges_gdf).compute(
+            scheduler='multiprocessing'
+        )
+
+    def debug_output_path(self):
+        output = Path(self.output_file_path)
+        return output.with_name(f"{output.stem}_intersection_scores.geojson")
+
     def calculate_quality_metric(self):
         try:
             gdf = gpd.read_file(self.edges_file_path)
+            edges_lonlat = gdf if gdf.crs is None else gdf.to_crs(self.output_projection)
+            # The hull of the edges as given: union_all would node them first.
+            bounding_polygon = GeometryCollection(list(edges_lonlat.geometry.dropna())).convex_hull
+            self.default_projection = self.work_crs(bounding_polygon)
+
+            try:
+                graph = fetch_seed_graph_with_retry(bounding_polygon)
+            except InsufficientResponseError:
+                graph = None
+
+            if graph is None or graph.number_of_edges() == 0:
+                logger.warning(
+                    "No qualifying OSM roads are available for %s under the current road/access filter. "
+                    "Cannot generate intersection scoring polygons; all %s tiles will have "
+                    "tra_score=-1 (unavailable).",
+                    self.edges_file_path,
+                    "supplied" if self.polygon_file_path else "generated fallback",
+                )
 
             if self.polygon_file_path:
-                 tile_gdf = gpd.read_file(self.polygon_file_path)
+                tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
-                unified_geom = gdf.unary_union
-                bounding_polygon = unified_geom.convex_hull
-                g_roads_simplified = ox.graph.graph_from_polygon(bounding_polygon, network_type='drive', simplify=True, retain_all=True)
-                tile_gdf = self.create_voronoi_diagram(g_roads_simplified, bounding_polygon)
-            
+                tile_graph = seed_graph_for_tiles(graph, bounding_polygon)
+                tile_gdf = self.create_tiles(bounding_polygon, tile_graph, self.default_projection)
+
+            if gdf.crs is None:
+                gdf = gdf.set_crs(self.output_projection)
             gdf = gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf.to_crs(self.default_projection)
             tile_gdf = tile_gdf[['geometry']]
-            no_of_cores = min(self.partition_count, os.cpu_count())
-            df_dask = dask_geopandas.from_geopandas(tile_gdf, npartitions=no_of_cores)
-
-            output = df_dask.apply(self.qm_func,axis=1, meta=[
-                ('geometry', 'geometry'),
-                ('tra_score', 'object')
-            ], gdf=gdf).compute(scheduler='multiprocessing')
+            dataset_footprint = repair_reprojected(gpd.GeoSeries(
+                [bounding_polygon], crs=self.output_projection,
+            ).to_crs(self.default_projection).iloc[0])
+            # Scoring keeps outside approaches; tiles use the original strict trim
+            # of the same downloaded OSM state.
+            intersection_gdf = create_intersection_polygons(
+                graph, self.default_projection, self.intersection_distance,
+                dataset_footprint=dataset_footprint,
+            )
+            intersection_scores = self.score_intersections(intersection_gdf, gdf)
+            output = average_scores_to_tiles(intersection_scores, tile_gdf)
+            if self.debug_intersection_polygons:
+                debug_output = intersection_scores.rename(columns=DIAGNOSTIC_PROPERTY_NAMES)
+                debug_output['ext:scoring_algorithm_version'] = SCORING_ALGORITHM_VERSION
+                debug_output.to_crs(self.output_projection).to_file(
+                    self.debug_output_path(), driver='GeoJSON',
+                )
+            logger.info(
+                "Scored %d intersection polygons; %d/%d tiles have assigned intersections",
+                len(intersection_scores), int((output['intersection_count'] > 0).sum()), len(output),
+            )
+            if not self.polygon_file_path:
+                output["tile_algorithm_version"] = TILE_ALGORITHM_VERSION
+            output = output.rename(columns=DIAGNOSTIC_PROPERTY_NAMES)
+            output['ext:scoring_algorithm_version'] = SCORING_ALGORITHM_VERSION
             output = output.to_crs(self.output_projection) # The output should be in WGS84 (epsg:4326)
+            if not self.polygon_file_path:
+                # A fallback cell can keep a near-pinched vertex that turns
+                # self-intersecting once reprojected to WGS84:
+                output = output.set_geometry([repair_reprojected(g) for g in output.geometry], crs=output.crs)
             output.to_file(self.output_file_path, driver='GeoJSON')
             return QualityMetricResult(success=True, message='QMXNLibCalculator', output_file=self.output_file_path)
 
@@ -165,17 +389,24 @@ class QMXNLibCalculator(QMCalculator):
             return QualityMetricResult(success=False, message=f'Error: {e}', output_file="")
 
 
-if __name__ == '__main__':
-    osw_edge_file_path = sys.argv[1]  # First argument: OSW edge file path
-    qm_file_path = sys.argv[2]        # Second argument: Quality metric output file path
+def main(argv=None):
+    """Run the CLI and return a process exit code reflecting calculation success."""
+    parser = argparse.ArgumentParser(description='Average intersection polygon quality scores onto tiles.')
+    parser.add_argument('edges_file')
+    parser.add_argument('output_file')
+    parser.add_argument('tile_file', nargs='?', help='Optional precomputed intersection tiles.')
+    parser.add_argument('--intersection-distance', type=float, default=DEFAULT_INTERSECTION_DISTANCE)
+    parser.add_argument('--debug-intersection-polygons', action='store_true')
+    args = parser.parse_args(argv)
+    calculator = QMXNLibCalculator(
+        args.edges_file, args.output_file, args.tile_file,
+        intersection_distance=args.intersection_distance,
+        debug_intersection_polygons=args.debug_intersection_polygons,
+    )
+    result = calculator.calculate_quality_metric()
+    print(result)
+    return 0 if result.success else 1
 
-    # Check if the optional third argument (xn_polygon_path) is provided
-    if len(sys.argv) > 3:
-        xn_polygon_path = sys.argv[3]  # Third argument: Intersection polygon file path (optional)
-        qm_calculator = QMXNLibCalculator(osw_edge_file_path, qm_file_path, xn_polygon_path)
-        print(qm_calculator.calculate_quality_metric())
-         
-    else:
-        # If the third argument is not provided, call without xn_polygon_path
-        qm_calculator = QMXNLibCalculator(osw_edge_file_path, qm_file_path)
-        print(qm_calculator.calculate_quality_metric())
+
+if __name__ == '__main__':
+    raise SystemExit(main())

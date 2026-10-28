@@ -27,7 +27,8 @@ class OswQmCalculator:
 
     """
 
-    def __init__(self, cores_to_use:int):
+    def __init__(self, cores_to_use:int, *, intersection_distance:float = 50.0,
+                 debug_intersection_polygons:bool = False):
         """
         Initializes the OswQmCalculator class.
 
@@ -36,6 +37,8 @@ class OswQmCalculator:
 
         """
         self.cores_to_use = cores_to_use
+        self.intersection_distance = intersection_distance
+        self.debug_intersection_polygons = debug_intersection_polygons
 
     def calculate_quality_metric(self, input_file, algorithm_names, output_path, ixn_file=None):
         """
@@ -48,48 +51,41 @@ class OswQmCalculator:
             ixn_file (str): The path to the sub-regions polygon file.
         Returns:
             None
+        Raises:
+            RuntimeError: A calculator reports failure or does not produce a
+                nonempty output file. No output ZIP is created in these cases.
 
         """
         try:
-            with zipfile.ZipFile(input_file, 'r') as input_zip:
-                input_unzip_folder = tempfile.TemporaryDirectory()
-                input_files_path = self.extract_zip(input_zip, input_unzip_folder.name)
-            # logging.info(f"Extracted input files: {file_list}")
-            # input_files_path = [os.path.join(input_unzip_folder.name, file) for file in file_list]
-            output_unzip_folder = tempfile.TemporaryDirectory()
-            logger.info(f"Started calculating quality metrics for input files: {input_files_path}")
-            # Get only the edges file out of the input files
-            edges_file_path = [file_path for file_path in input_files_path if 'edges' in file_path]
-            if len(edges_file_path) == 0:
-                raise Exception('Edges file not found in input files.')
-            edges_file_path = edges_file_path[0]
-            edges_file_basename = os.path.basename(edges_file_path)
-            edges_file_without_extension = os.path.splitext(edges_file_basename)[0]
-            for algorithm_name in algorithm_names:
-                qm_edges_output_path = os.path.join(output_unzip_folder.name, f'{algorithm_name}_qm.geojson')
-                qm_calculator = self.get_osw_qm_calculator(algorithm_name, ixn_file, edges_file_path, qm_edges_output_path)
-                start_time = time.time()
-                qm_calculator.calculate_quality_metric()
-                end_time = time.time()
-                logger.info(f"Time taken to calculate quality metrics for {algorithm_name}: {end_time - start_time} seconds")
-            # Copy the rest of the files from input to output
-            # Dont copy the other files here.
-            # for file_path in input_files_path:
-            #     if 'edges' in file_path:
-            #         continue
-            #     file_basename = os.path.basename(file_path)
-            #     output_file_path = os.path.join(output_unzip_folder.name, file_basename)
-            #     os.rename(file_path, output_file_path)
-
-            logger.info(f"Finished calculating quality metrics for input files: {input_files_path}")
-            logger.info(f'Zipping output files to {output_path}')
-            self.zip_folder(output_unzip_folder.name, output_path)
-            logger.info(f'Cleaning up temporary folders.')
-            input_unzip_folder.cleanup()
-            output_unzip_folder.cleanup()
+            with tempfile.TemporaryDirectory() as input_unzip_folder, \
+                    tempfile.TemporaryDirectory() as output_unzip_folder:
+                with zipfile.ZipFile(input_file, 'r') as input_zip:
+                    input_files_path = self.extract_zip(input_zip, input_unzip_folder)
+                logger.info(f"Started calculating quality metrics for input files: {input_files_path}")
+                # Get only the edges file out of the input files
+                edges_file_path = [file_path for file_path in input_files_path if 'edges' in file_path]
+                if len(edges_file_path) == 0:
+                    raise Exception('Edges file not found in input files.')
+                edges_file_path = edges_file_path[0]
+                for algorithm_name in algorithm_names:
+                    qm_edges_output_path = os.path.join(output_unzip_folder, f'{algorithm_name}_qm.geojson')
+                    qm_calculator = self.get_osw_qm_calculator(algorithm_name, ixn_file, edges_file_path, qm_edges_output_path)
+                    start_time = time.time()
+                    result = qm_calculator.calculate_quality_metric()
+                    if not result.success:
+                        raise RuntimeError(f"Quality metric '{algorithm_name}' failed: {result.message}")
+                    if not os.path.isfile(qm_edges_output_path) or os.path.getsize(qm_edges_output_path) == 0:
+                        raise RuntimeError(
+                            f"Quality metric '{algorithm_name}' reported success but its output file is missing or empty"
+                        )
+                    end_time = time.time()
+                    logger.info(f"Time taken to calculate quality metrics for {algorithm_name}: {end_time - start_time} seconds")
+                logger.info(f"Finished calculating quality metrics for input files: {input_files_path}")
+                logger.info(f'Zipping output files to {output_path}')
+                self.zip_folder(output_unzip_folder, output_path)
         except Exception as e:
             logging.error(f'Error calculating quality metrics: {e}')
-            raise e
+            raise
 
     def get_osw_qm_calculator(self, algorithm_name:str, ixn_file:str=None, edges_file:str=None, output_file:str=None) -> QMCalculator:
         """
@@ -103,7 +99,11 @@ class OswQmCalculator:
 
         """
         if algorithm_name == 'ixn':
-            return QMXNLibCalculator(edges_file, output_file, ixn_file, self.cores_to_use)
+            return QMXNLibCalculator(
+                edges_file, output_file, ixn_file, self.cores_to_use,
+                intersection_distance=self.intersection_distance,
+                debug_intersection_polygons=self.debug_intersection_polygons,
+            )
         else:
             return QMFixedCalculator(edges_file, output_file)
 

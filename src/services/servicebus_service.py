@@ -2,6 +2,7 @@ import os.path
 import shutil
 import time
 import signal
+from uuid import uuid4
 from urllib.parse import urlparse
 
 from python_ms_core import Core
@@ -14,6 +15,7 @@ from src.models.quality_request import QualityRequest
 from src.models.quality_response import QualityMetricResponse, ResponseData
 from src.services.osw_qm_calculator_service import OswQmCalculator
 import threading
+from importlib.metadata import version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("QualityMetricService")
@@ -47,6 +49,14 @@ class ServiceBusService:
     #     process_thread.start()
 
     def start_listening(self):
+        renewal = getattr(self.incoming_topic, 'max_renewal_duration', None)
+        renewal = renewal if isinstance(renewal, (int, float)) else 'unreported'
+        logger.info(
+            'Queue worker timing: python_ms_core=%s max_concurrent_messages=%s '
+            'partition_count=%s reported_lock_renewal_limit_seconds=%s',
+            version('python_ms_core'), self.config.max_concurrent_messages,
+            self.config.partition_count, renewal,
+        )
         self.incoming_topic.subscribe(
             self.config.incoming_topic_subscription,
             self.process_message,
@@ -57,75 +67,101 @@ class ServiceBusService:
             self._stop_server_and_container(delay_seconds=5)
 
     def process_message(self, msg: QueueMessage):
+        started = time.monotonic()
+        outcome = 'failed'
         logger.info(f"Processing message {msg}")
         input_file_url = None
+        download_folder = None
         try:
-            logger.info(f"Processing message {msg.messageId}")
-            # Parse the message
-            quality_request = QualityRequest(messageType=msg.messageType,messageId=msg.messageId,data=msg.data)
-            # Download the file
-            input_file_url = quality_request.data.data_file
-            parsed_url = urlparse(input_file_url)
-            file_name = os.path.basename(parsed_url.path)
-            input_dir_path = parsed_url.path
-            download_folder = os.path.join(self.config.get_download_folder(),msg.messageId)
-            os.makedirs(download_folder,exist_ok=True)
-            download_path = os.path.join(download_folder,file_name)
-            self.storage_service.download_remote_file(input_file_url, download_path)
-            logger.info(f'Downloaded file to {download_path}')
-            # intersection file
-            ixn_file_url = quality_request.data.sub_regions_file
-            ixn_file_path = None
-            if ixn_file_url is not None:
-                logger.info(f'Downloading intersection file {ixn_file_url}')
-                ixn_file_name = os.path.basename(ixn_file_url)
-                ixn_file_path = os.path.join(download_folder,ixn_file_name)
-                self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
-                # quality_request.data.intersectionFile = ixn_file_path
+            try:
+                logger.info(f"Processing message {msg.messageId}")
+                # Parse the message
+                quality_request = QualityRequest(messageType=msg.messageType,messageId=msg.messageId,data=msg.data)
+                # Download the file
+                input_file_url = quality_request.data.data_file
+                parsed_url = urlparse(input_file_url)
+                file_name = os.path.basename(parsed_url.path)
+                attempt_id = uuid4().hex
+                attempt_folder = os.path.join(self.config.get_download_folder(), attempt_id)
+                # Only clean up a directory this attempt successfully created.
+                os.makedirs(attempt_folder, exist_ok=False)
+                download_folder = attempt_folder
+                download_path = os.path.join(download_folder,file_name)
+                self.storage_service.download_remote_file(input_file_url, download_path)
+                logger.info(f'Downloaded file to {download_path}')
+                # intersection file
+                ixn_file_url = quality_request.data.sub_regions_file
+                ixn_file_path = None
+                if ixn_file_url is not None:
+                    logger.info(f'Downloading intersection file {ixn_file_url}')
+                    ixn_file_name = os.path.basename(ixn_file_url)
+                    ixn_file_path = os.path.join(download_folder,ixn_file_name)
+                    self.storage_service.download_remote_file(ixn_file_url, ixn_file_path)
+                    # quality_request.data.intersectionFile = ixn_file_path
 
-            # Process the file
-            output_folder = os.path.join(download_folder,'qm')
-            os.makedirs(output_folder,exist_ok=True)
-            output_file_local_path = os.path.join(output_folder,'qm-output.zip')
-            cores_to_use = self.config.partition_count
-            qm_calculator = OswQmCalculator(cores_to_use=cores_to_use)
-            algorithm_names = quality_request.data.algorithm.split(',')
-            qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
-            # Upload the file
-            output_file_remote_path = f'{self.get_directory_path(input_file_url)}/qm-{quality_request.data.jobId}-output.zip'
-            output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
-            logger.info(f'Uploaded file to {output_file_url}')
+                # Process the file
+                output_folder = os.path.join(download_folder,'qm')
+                os.makedirs(output_folder,exist_ok=True)
+                output_file_local_path = os.path.join(output_folder,'qm-output.zip')
+                cores_to_use = self.config.partition_count
+                qm_calculator = OswQmCalculator(
+                    cores_to_use=cores_to_use,
+                    intersection_distance=self.config.intersection_distance,
+                    debug_intersection_polygons=self.config.debug_intersection_polygons,
+                )
+                algorithm_names = quality_request.data.algorithm.split(',')
+                qm_calculator.calculate_quality_metric(download_path, algorithm_names,output_file_local_path,ixn_file_path)
+                # Upload the file
+                # Each delivery owns its output: retries neither overwrite a result
+                # nor fail because an earlier attempt already uploaded the same blob.
+                output_file_remote_path = (
+                    f'{self.get_directory_path(input_file_url)}/'
+                    f'qm-{quality_request.data.jobId}-{attempt_id}-output.zip'
+                )
+                output_file_url = self.storage_service.upload_local_file(output_file_local_path,output_file_remote_path)
+                logger.info(f'Uploaded file to {output_file_url}')
 
-            response_data = {
-                'status':'success',
-                'message':'Quality metrics calculated successfully',
-                'success':True,
-                'dataset_url':input_file_url,
-                'qm_dataset_url':output_file_url
-            }
-            response = QualityMetricResponse(
-                messageType=msg.messageType,
-                messageId=msg.messageId,
-                data=  response_data
-            )
+                response_data = {
+                    'status':'success',
+                    'message':'Quality metrics calculated successfully',
+                    'success':True,
+                    'dataset_url':input_file_url,
+                    'qm_dataset_url':output_file_url
+                }
+                response = QualityMetricResponse(
+                    messageType=msg.messageType,
+                    messageId=msg.messageId,
+                    data=  response_data
+                )
+            except Exception as e:
+                logger.error(f'Error processing message {msg.messageId} : {e}')
+                response_data = {
+                    'status':'failed',
+                    'message':str(e),
+                    'success':False,
+                    'dataset_url':input_file_url,
+                    'qm_dataset_url':None
+                }
+                response = QualityMetricResponse(
+                    messageType=msg.messageType,
+                    messageId=msg.messageId,
+                    data=  response_data
+                )
+            # Publish outside the calculation-error handler. A delivery failure
+            # must reach the queue worker, never become a false calculation failure.
+            outcome = 'response_delivery_failed'
             self.send_response(response)
-            # Process the message
-            # Clean up the download_folder
-        except Exception as e:
-            logger.error(f'Error processing message {msg.messageId} : {e}')
-            response_data = {
-                'status':'failed',
-                'message':str(e),
-                'success':False,
-                'dataset_url':input_file_url,
-                'qm_dataset_url':None
-            }
-            response = QualityMetricResponse(
-                messageType=msg.messageType,
-                messageId=msg.messageId,
-                data=  response_data
-            )
-            self.send_response(response)
+            outcome = 'success' if response.data.success else 'failed'
+        finally:
+            if download_folder is not None:
+                try:
+                    shutil.rmtree(download_folder)
+                except OSError:
+                    # A cleanup error must not hide a delivery failure or retry
+                    # a job whose response has already been published.
+                    logger.exception('Failed to clean up job files: %s', download_folder)
+            logger.info('Message processing finished: message_id=%s status=%s elapsed_seconds=%.3f',
+                        msg.messageId, outcome, time.monotonic() - started)
 
     def send_response(self, msg: QueueMessage):
         try:
@@ -138,7 +174,7 @@ class ServiceBusService:
             logger.info(f"Publishing response for message {msg.messageId}")
         except Exception as e:
             logger.error(f'Failed to send response for message {msg.messageId} with error {e}')
-        pass
+            raise
 
     def get_directory_path(self, remote_url: str) -> str:
         # https://tdeisamplestorage.blob.core.windows.net/osw/test_upload/df/fff/500mb_file.zip

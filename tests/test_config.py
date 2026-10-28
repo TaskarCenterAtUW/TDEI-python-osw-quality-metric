@@ -15,6 +15,8 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.storage_container_name, 'osw')
         self.assertEqual(config.max_concurrent_messages, 1)
         self.assertEqual(config.partition_count, 2)
+        self.assertEqual(config.intersection_distance, 50.0)
+        self.assertFalse(config.debug_intersection_polygons)
 
     def test_algorithm_dictionary(self):
         config = Config()
@@ -43,7 +45,9 @@ class TestConfig(unittest.TestCase):
         'QUALITY_RES_TOPIC': 'test_outgoing_topic',
         'CONTAINER_NAME': 'test_container',
         'MAX_CONCURRENT_MESSAGES': '5',
-        'PARTITION_COUNT': '10'
+        'PARTITION_COUNT': '10',
+        'INTERSECTION_DISTANCE': '35',
+        'DEBUG_INTERSECTION_POLYGONS': 'true',
     })
     def test_environment_variable_overrides(self):
         config = Config()
@@ -53,6 +57,8 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.storage_container_name, 'osw')
         self.assertEqual(config.max_concurrent_messages, 5)  # Casts to int
         self.assertEqual(config.partition_count, 10)  # Casts to int
+        self.assertEqual(config.intersection_distance, 35.0)
+        self.assertTrue(config.debug_intersection_polygons)
 
 
 if __name__ == '__main__':
