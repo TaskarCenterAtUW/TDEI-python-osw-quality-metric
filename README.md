@@ -33,6 +33,7 @@ MAX_CONCURRENT_MESSAGES=xxx # Optional if not provided defaults to 1
 PARTITION_COUNT=xx # Optional number of partitions to use for dask library. defaults to 2
 INTERSECTION_DISTANCE=50 # Optional polygon side distance in meters
 DEBUG_INTERSECTION_POLYGONS=false # Optional intermediate per-polygon score GeoJSON
+FAIRWAY_MAPPER_API_KEY=your_key_here # Required for intersection scoring
 ```
 Note: Replace the endpoints with the actual endpoints of the environment you want to run the service in
 
@@ -124,6 +125,18 @@ retain their original behavior. Only scoring polygons use the retained boundary
 approaches. Tile scores and intersection counts can change as new polygons
 contribute. Scoring polygons remain whole, so pedestrian data ending at the dataset
 boundary can leave some approaches without contacts and lower the score.
+
+Road data comes from [Fairway Mapper's authenticated Overpass mirror](https://www.fairwaymapper.com/api/overpass)
+at `https://api.fairwaymapper.com/api/interpreter`. Set `FAIRWAY_MAPPER_API_KEY`
+in the service's `.env`, or export it in the environment before calling the
+library or CLI. The key is sent only in the Authorization header. The road/access
+filter, query subdivision, and graph processing remain the same. Cached queries
+are scoped to this provider; old public Overpass cache entries are not reused.
+Transient connection failures and HTTP 429/500/502/503/504 receive up to three
+attempts. Authentication failures, malformed responses, and partial query results
+fail the calculation instead of being treated as an empty road network.
+There is no fallback to the public Overpass service. Tile geometries are preserved
+for identical OSM input; a different mirror's data freshness can change results.
 
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is

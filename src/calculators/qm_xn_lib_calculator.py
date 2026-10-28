@@ -1,4 +1,5 @@
 from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
+from src.calculators.fairway_mapper import download_seed_network
 from src.calculators.intersection_polygons import (
     DEFAULT_INTERSECTION_DISTANCE, DIAGNOSTIC_PROPERTY_NAMES,
     create_intersection_polygons, average_scores_to_tiles,
@@ -23,12 +24,9 @@ import numpy as np
 import pandas as pd
 import os
 import osmnx as ox
-from osmnx import _overpass
 from osmnx.graph import _create_graph
-import re
 import time
 from requests.exceptions import ConnectionError, HTTPError, Timeout
-from osmnx._errors import ResponseStatusCodeError
 
 logger = logging.getLogger(__name__)
 SCORING_ALGORITHM_VERSION = "intersection-approaches-v1"
@@ -41,7 +39,7 @@ def fetch_seed_graph(polygon):
     simplify=True and retain_all=True. Keep its original 500 m buffer trimming
     BEFORE simplification; only the final hull trim retains outside neighbors.
     A strict final trim can then recover the original tile seed graph exactly.
-    These two private OSMnx helpers let both graphs share one download. Recheck
+    Both graphs share one Fairway Mapper download. Recheck the private helpers in
     this pipeline against graph_from_polygon when upgrading the pinned OSMnx.
     """
     try:
@@ -53,7 +51,7 @@ def fetch_seed_graph(polygon):
         buffered, _ = ox.projection.project_geometry(
             projected.buffer(500), crs=crs, to_latlong=True,
         )
-        responses = _overpass._download_overpass_network(buffered, 'all', SEED_CUSTOM_FILTER)
+        responses = download_seed_network(buffered, SEED_CUSTOM_FILTER)
         graph = _create_graph(responses, 'all' in ox.settings.bidirectional_network_types)
         graph = ox.truncate.truncate_graph_polygon(graph, buffered, truncate_by_edge=False)
         graph = ox.simplification.simplify_graph(graph)
@@ -78,17 +76,13 @@ def seed_graph_for_tiles(graph, polygon):
 
 
 def fetch_seed_graph_with_retry(polygon):
-    """Retry transient Overpass failures without treating them as an empty graph."""
+    """Retry transient Fairway Mapper failures without treating them as an empty graph."""
     for attempt in range(3):
         try:
             return fetch_seed_graph(polygon)
-        except (ConnectionError, Timeout, HTTPError, ResponseStatusCodeError) as exc:
+        except (ConnectionError, Timeout, HTTPError) as exc:
             if isinstance(exc, HTTPError):
                 status = exc.response.status_code if exc.response is not None else None
-            elif isinstance(exc, ResponseStatusCodeError):
-                # OSMnx discards the response object and embeds status in its message.
-                match = re.search(r"responded: (\d{3})\b", str(exc))
-                status = int(match.group(1)) if match else None
             else:
                 status = None
             transient = isinstance(exc, (ConnectionError, Timeout)) or status in {
@@ -98,7 +92,7 @@ def fetch_seed_graph_with_retry(polygon):
                 raise
             delay = 10 * 2 ** attempt
             logger.warning(
-                "Temporary Overpass failure (%s); retrying in %s seconds (attempt %s/3)",
+                "Temporary Fairway Mapper failure (%s); retrying in %s seconds (attempt %s/3)",
                 type(exc).__name__, delay, attempt + 2,
             )
             time.sleep(delay)

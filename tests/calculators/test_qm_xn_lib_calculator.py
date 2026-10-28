@@ -39,8 +39,9 @@ PINCHED_CELL = wkt.loads(
 
 
 class TestBoundarySeedGraph(unittest.TestCase):
+    @patch('src.calculators.qm_xn_lib_calculator.download_seed_network')
     @patch('osmnx._overpass._download_overpass_network')
-    def test_boundary_t_keeps_three_approaches_and_original_tile_geometries(self, download):
+    def test_boundary_t_keeps_three_approaches_and_original_tile_geometries(self, original_download, download):
         # Goldendale's failure pattern: a junction just inside the northern
         # boundary, with the north and west road endpoints outside the hull.
         positions = {
@@ -63,6 +64,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
             {'type': 'way', 'id': 4, 'nodes': [3, 4], 'tags': {'highway': 'residential'}},
         ]}
         download.return_value = [response]
+        original_download.return_value = [response]
         hull = box(-120.818, 45.835, -120.814, 45.8382175)
         old_graph = ox.graph_from_polygon(
             hull, custom_filter=SEED_CUSTOM_FILTER, simplify=True, retain_all=True,
@@ -70,7 +72,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
         download.reset_mock()
         graph = fetch_seed_graph(hull)
         download.assert_called_once()
-        self.assertEqual(download.call_args.args[1:], ('all', SEED_CUSTOM_FILTER))
+        self.assertEqual(download.call_args.args[1:], (SEED_CUSTOM_FILTER,))
         self.assertEqual(set(old_graph.neighbors(48719999)), {3})
         self.assertEqual(set(graph.neighbors(48719999)), {1, 2, 3})
         footprint = gpd.GeoSeries([hull], crs=4326).to_crs(32610).iloc[0]
@@ -119,7 +121,7 @@ class TestBoundarySeedGraph(unittest.TestCase):
             self.assertEqual(debug['ext:intersection_id'].tolist(), ['48719999'])
             self.assertEqual(debug['ext:degree'].tolist(), [3])
 
-    @patch('src.calculators.qm_xn_lib_calculator._overpass._download_overpass_network')
+    @patch('src.calculators.qm_xn_lib_calculator.download_seed_network')
     def test_fetch_preserves_empty_network_handling_and_propagates_other_errors(self, fetch):
         for error in [
             InsufficientResponseError('No matching roads'),
