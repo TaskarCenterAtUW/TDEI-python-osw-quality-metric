@@ -622,6 +622,9 @@ class TestIntersectionTiles(unittest.TestCase):
             self.assertTrue((debug['ext:total_edges'] == debug['ext:degree'] * (debug['ext:degree'] + 1) / 2).all())
             self.assertTrue((debug['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
             self.assertTrue((scored['ext:scoring_algorithm_version'] == SCORING_ALGORITHM_VERSION).all())
+            self.assertTrue(debug['ext:cluster_diameter_m'].between(0, 20).all())
+            self.assertTrue((debug['ext:cluster_member_count'] >= 1).all())
+            self.assertTrue(debug['ext:cluster_members_covered'].all())
             for _, row in debug.iterrows():
                 roles = row['ext:side_roles'].split(',')
                 self.assertEqual(len(roles), row['ext:side_count'])
@@ -633,6 +636,7 @@ class TestIntersectionTiles(unittest.TestCase):
                 'ext:side_count', 'ext:cap_side_count', 'ext:polygon_distance_m',
                 'ext:total_edges', 'ext:connect_edges',
                 'ext:side_roles', 'ext:scoring_algorithm_version', 'ext:extends_beyond_dataset',
+                'ext:cluster_diameter_m', 'ext:cluster_member_count', 'ext:cluster_members_covered',
             })
             tiles = calculator.create_tiles(self.hull, self.graph, calculator.default_projection)
             expected = average_scores_to_tiles(debug.to_crs(tiles.crs), tiles)

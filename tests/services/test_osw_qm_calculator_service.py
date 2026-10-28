@@ -170,7 +170,7 @@ class TestOswQmCalculator(unittest.TestCase):
                             self.assertEqual(len(diagnostics['features']), 6)
                             for feature in diagnostics['features']:
                                 self.assertEqual(feature['properties']['ext:scoring_algorithm_version'],
-                                                 'intersection-approaches-v1')
+                                                 'intersection-approaches-v2')
                         self.assertEqual(set(archive.namelist()), expected_files)
                         output = json.loads(archive.read('ixn_qm.geojson'))
                 self.assertEqual(output['type'], 'FeatureCollection')

@@ -1,5 +1,6 @@
 import unittest
 import tempfile
+from itertools import combinations
 from pathlib import Path
 
 import geopandas as gpd
@@ -10,6 +11,7 @@ from shapely import LineString, Point, Polygon, box
 from src.calculators.intersection_polygons import (
     add_closing_cap_directions, average_scores_to_tiles, create_intersection_polygons,
     deduplicate_directions, polygon_from_directions, polygon_side_roles,
+    bounded_junction_clusters,
 )
 from src.calculators.qm_xn_lib_calculator import QMXNLibCalculator
 
@@ -25,6 +27,62 @@ def road_graph(positions, pairs, crs="EPSG:32610"):
 
 
 class TestIntersectionPolygons(unittest.TestCase):
+    def junction_chain(self, count=7, spacing=20):
+        positions = {i: (500000 + spacing * i, 5200000) for i in range(count)}
+        positions.update({100+i: (500000 + spacing * i, 5200100) for i in range(count)})
+        positions.update({200: (499900, 5200000),
+                          201: (500100 + spacing * (count-1), 5200000)})
+        pairs = ([(i, i+1) for i in range(count-1)]
+                 + [(i, 100+i) for i in range(count)] + [(0, 200), (count-1, 201)])
+        return road_graph(positions, pairs), positions, pairs
+
+    def test_long_chain_is_split_without_losing_member_junctions(self):
+        graph, positions, _ = self.junction_chain()
+        polygons = create_intersection_polygons(graph, 32610)
+        self.assertEqual(polygons.intersection_id.tolist(), ['0|1', '2|3', '4|5', '6'])
+        assigned = []
+        for row in polygons.itertuples():
+            members = [int(node) for node in row.intersection_id.split('|')]
+            assigned.extend(members)
+            diameter = max((Point(positions[a]).distance(Point(positions[b]))
+                            for a, b in combinations(members, 2)), default=0)
+            self.assertEqual(row.cluster_diameter_m, diameter)
+            self.assertLessEqual(diameter, 20)
+            self.assertEqual(row.cluster_member_count, len(members))
+            self.assertTrue(row.cluster_members_covered)
+            self.assertTrue(all(row.geometry.covers(Point(positions[node])) for node in members))
+            self.assertEqual(row.degree, 3)  # Split links become real external approaches.
+            self.assertEqual(row.side_roles.split(',').count('approach'), 3)
+        self.assertEqual(sorted(assigned), list(range(7)))
+
+    def test_cluster_diameter_checks_all_members_not_only_links_or_center(self):
+        # All three are within 15 m of the middle, but the endpoints are 30 m apart.
+        points = {0: Point(-15, 0), 1: Point(0, 0), 2: Point(15, 0)}
+        adjacency = nx.Graph([(0, 1), (1, 2)])
+        self.assertEqual(bounded_junction_clusters(adjacency, points, 20), [(0, 1), (2,)])
+
+    def test_cluster_boundary_and_input_order_are_deterministic(self):
+        for spacing, expected_count in [(20, 1), (20.0001, 2)]:
+            with self.subTest(spacing=spacing):
+                graph, _, _ = self.junction_chain(count=2, spacing=spacing)
+                self.assertEqual(len(create_intersection_polygons(graph, 32610)), expected_count)
+        graph, positions, pairs = self.junction_chain()
+        reverse = road_graph(dict(reversed(list(positions.items()))), list(reversed(pairs)))
+        expected = create_intersection_polygons(graph, 32610)
+        actual = create_intersection_polygons(reverse, 32610)
+        self.assertEqual(actual.intersection_id.tolist(), expected.intersection_id.tolist())
+        self.assertEqual(actual.side_roles.tolist(), expected.side_roles.tolist())
+        self.assertTrue(actual.geom_equals_exact(expected.geometry, tolerance=1e-8).all())
+
+    def test_small_custom_polygons_still_cover_all_cluster_members(self):
+        graph, positions, _ = self.junction_chain(count=2, spacing=14)
+        polygons = create_intersection_polygons(graph, 32610, distance=5)
+        self.assertEqual(polygons.intersection_id.tolist(), ['0', '1'])
+        for row in polygons.itertuples():
+            self.assertTrue(row.geometry.covers(Point(positions[int(row.intersection_id)])))
+            self.assertEqual(row.cluster_diameter_m, 0)
+            self.assertTrue(row.cluster_members_covered)
+
     def test_outside_junction_supplies_an_approach_but_cannot_join_cluster(self):
         graph = road_graph(
             {0: (500000, 5200000), 1: (500000, 5200014),

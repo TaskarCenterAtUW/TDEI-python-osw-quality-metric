@@ -8,14 +8,32 @@ across the tile boundary itself. Consequently, unchanged tile geometries do not
 imply comparable scores. Consumers should label and retain the scoring version
 and avoid silently combining historical and current results.
 
-The current version is `intersection-approaches-v1`. It counts actual street
+The current version is `intersection-approaches-v2`. It counts actual street
 approaches, excluding artificial closing sides of the polygon. Same-approach
 connectivity still requires two distinct boundary contacts connected through the
 pedestrian network inside the polygon. A fully connected T junction earns 1
 (six connected pairs out of six); merely connecting one contact on each of its
-three approaches earns 0.5. The earlier polygon scorer included closing sides.
+three approaches earns 0.5. Version 1 already used this approach-only formula;
+the polygon scorer before version 1 included closing sides.
 
-This migration document does not change the calculation or output format.
+Version 2 replaces version 1's connected-component clustering with deterministic,
+nearest-first merging of road-connected groups. A merge is accepted only if every
+pair of members is at most 20 m apart; ties use node IDs. For custom polygon
+distances below 20 m, that smaller distance also limits cluster diameter. This
+keeps members within the polygon's inscribed circle. Every emitted polygon is
+checked for member containment; failure aborts the calculation.
+
+Previously, seven road-connected junctions 20 m apart could form a 120 m cluster
+whose end junctions lay outside its polygon. Version 2 splits such chains into
+bounded groups. The resulting polygon counts, approaches, assignments, and scores
+can change. Tile generation, the connectivity formula (including same-approach
+requirements), and polygon overlap handling are unchanged. Keep v1 and v2 results
+distinguishable when comparing or caching scores.
+
+Debug polygons additionally expose `ext:cluster_diameter_m` (maximum pairwise
+distance; zero for singletons), `ext:cluster_member_count`, and
+`ext:cluster_members_covered` (true for every emitted polygon). These properties
+describe the OSM junction cluster, not its assigned output tiles.
 
 ## Output contract
 
@@ -31,7 +49,7 @@ the debug filename adds `_intersection_scores` to its stem.
 | --- | --- |
 | `tra_score` | Number in [0, 1], or -1 when unavailable. Zero is a valid score. Show -1 as unavailable/N/A, separately from zero; exclude it from score summaries and numeric color scales. Never clamp it to zero. |
 | `ext:intersection_count` | Integer number of assigned polygons, including failed scores. It is neither the valid-score denominator nor a distinct-intersection count across tiles. |
-| `ext:scoring_algorithm_version` | `intersection-approaches-v1`. Preserve alongside cached/exported scores. An absent value means legacy/unversioned, not this version. An unfamiliar value needs explicit compatibility review. |
+| `ext:scoring_algorithm_version` | `intersection-approaches-v2`. Preserve alongside cached/exported scores. An absent value means legacy/unversioned, not this version. An unfamiliar value needs explicit compatibility review. |
 | `tile_algorithm_version` | Present for generated tiles; describes tiling only. Absent for supplied tiles. Do not use it as the scoring version. |
 
 Accept additional properties, including `ext:*`, without rejecting the dataset.

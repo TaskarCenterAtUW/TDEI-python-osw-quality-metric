@@ -105,8 +105,12 @@ To run a single test use
 The intersection calculator has one scoring workflow: create local polygons,
 score OSW connectivity inside each polygon, and average those scores onto tiles.
 Polygon sides are perpendicular to cleaned street approaches, 50 meters from the
-intersection center by default. Nearby connected intersection nodes within 20
-meters are clustered, directions within 10 degrees are merged, and gaps above
+intersection center by default. Road-connected intersection nodes are clustered
+with a maximum pairwise diameter of 20 meters. Groups merge nearest first, with
+node IDs breaking distance ties; a chain of short links cannot exceed that limit.
+For a custom polygon distance below 20 meters, the diameter limit uses that smaller
+distance. Every emitted polygon is checked to cover all its member junctions.
+Directions within 10 degrees are merged, and gaps above
 135 degrees receive closing sides to prevent spikes. Road deduplication preserves
 distinct geometries between the same endpoint nodes while merging reversed
 copies of the same geometry, both before junction detection and within clusters.
@@ -195,10 +199,11 @@ averages; a tile with no valid score remains `-1`. Fallback grid tiles with no
 nearby intersection also receive `-1`. Generated tiles retain
 `tile_algorithm_version`.
 Both final and debug outputs also include `ext:scoring_algorithm_version`, set to
-`intersection-approaches-v1` for this scoring rule. The previous intersection
-scorer counted closing sides as well, so scores can change for capped polygons
-and the tiles receiving their scores. The tiling version continues to describe
-only tile generation.
+`intersection-approaches-v2` for this scoring rule. Version 2 bounds cluster
+diameter; version 1 already excluded closing sides but allowed unbounded chains
+of nearby junctions. Splitting those chains can change polygon counts, approaches,
+and tile scores. Polygon overlap handling is unchanged. The tiling version
+continues to describe only tile generation.
 
 ```shell
 python -m src.calculators.qm_xn_lib_calculator edges.geojson ixn_qm.geojson \
@@ -214,8 +219,13 @@ An optional third positional argument supplies precomputed tiles. With debug
 enabled, `ixn_qm_intersection_scores.geojson` is saved alongside the final output,
 with `tra_score` plus diagnostic properties `ext:intersection_id`, `ext:degree`,
 `ext:side_count`, `ext:cap_side_count`, `ext:polygon_distance_m`, `ext:total_edges`,
-`ext:connect_edges`, `ext:side_roles`, and `ext:extends_beyond_dataset`.
+`ext:connect_edges`, `ext:side_roles`, `ext:extends_beyond_dataset`,
+`ext:cluster_diameter_m`, `ext:cluster_member_count`, and `ext:cluster_members_covered`.
 Service runs include it in the output ZIP.
+Cluster diameter is the maximum projected distance between member junctions
+(zero for a singleton); member count is the number of OSM junction nodes.
+`ext:cluster_members_covered` is true for every emitted polygon. A failed
+containment check fails the calculation instead of publishing a misleading score.
 `ext:extends_beyond_dataset` is true when any part of the scoring polygon lies
 outside the input edges' convex hull. It flags potentially incomplete pedestrian
 coverage for interpretation; it does not modify the scoring formula.

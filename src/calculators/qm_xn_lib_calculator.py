@@ -31,7 +31,7 @@ import time
 from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 logger = logging.getLogger(__name__)
-SCORING_ALGORITHM_VERSION = "intersection-approaches-v1"
+SCORING_ALGORITHM_VERSION = "intersection-approaches-v2"
 
 
 def fetch_seed_graph(polygon, *, budget=None):
