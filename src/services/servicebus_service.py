@@ -71,6 +71,7 @@ class ServiceBusService:
         outcome = 'failed'
         logger.info(f"Processing message {msg}")
         input_file_url = None
+        download_folder = None
         try:
             try:
                 logger.info(f"Processing message {msg.messageId}")
@@ -81,8 +82,10 @@ class ServiceBusService:
                 parsed_url = urlparse(input_file_url)
                 file_name = os.path.basename(parsed_url.path)
                 attempt_id = uuid4().hex
-                download_folder = os.path.join(self.config.get_download_folder(), attempt_id)
-                os.makedirs(download_folder,exist_ok=True)
+                attempt_folder = os.path.join(self.config.get_download_folder(), attempt_id)
+                # Only clean up a directory this attempt successfully created.
+                os.makedirs(attempt_folder, exist_ok=False)
+                download_folder = attempt_folder
                 download_path = os.path.join(download_folder,file_name)
                 self.storage_service.download_remote_file(input_file_url, download_path)
                 logger.info(f'Downloaded file to {download_path}')
@@ -150,6 +153,13 @@ class ServiceBusService:
             self.send_response(response)
             outcome = 'success' if response.data.success else 'failed'
         finally:
+            if download_folder is not None:
+                try:
+                    shutil.rmtree(download_folder)
+                except OSError:
+                    # A cleanup error must not hide a delivery failure or retry
+                    # a job whose response has already been published.
+                    logger.exception('Failed to clean up job files: %s', download_folder)
             logger.info('Message processing finished: message_id=%s status=%s elapsed_seconds=%.3f',
                         msg.messageId, outcome, time.monotonic() - started)
 

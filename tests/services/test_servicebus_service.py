@@ -2,6 +2,7 @@ import unittest
 import os
 import tempfile
 import zipfile
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 from src.services.servicebus_service import ServiceBusService
 from src.models.quality_request import RequestData, QualityRequest
@@ -275,6 +276,117 @@ class TestServiceBusService(unittest.TestCase):
         publisher.assert_called_once()
         self.assertFalse(publisher.call_args.kwargs['data'].data['success'])
         self.service.storage_service.upload_local_file.assert_not_called()
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_job_files_are_removed_on_success_and_each_failure_stage(self, calculator):
+        publisher = self.service.core.get_topic.return_value.publish
+        self.test_message.data['sub_regions_file'] = 'https://example.com/tiles.geojson'
+        neighbor = Path(self.download_root, 'another-active-job')
+        neighbor.mkdir()
+        sentinel = neighbor / 'keep.txt'
+        sentinel.write_text('active job')
+        for failure in [None, 'download', 'subregions', 'calculation', 'upload', 'publish', 'failed_publish']:
+            with self.subTest(failure=failure):
+                paths = []
+                publisher.reset_mock()
+
+                def download(url, path):
+                    paths.append(Path(path))
+                    Path(path).write_bytes(b'downloaded input')
+                    if failure == 'download' or (failure == 'subregions' and len(paths) == 2):
+                        raise RuntimeError('Download failed')
+
+                def calculate(input_path, algorithms, output_path, subregions_path):
+                    Path(output_path).write_bytes(b'partial or complete ZIP')
+                    self.assertTrue(Path(subregions_path).exists())
+                    if failure in ['calculation', 'failed_publish']:
+                        raise RuntimeError('Calculation failed')
+
+                def upload(local_path, remote_path):
+                    self.assertTrue(Path(local_path).is_file())
+                    if failure == 'upload':
+                        raise RuntimeError('Upload failed')
+                    return 'https://example.com/output.zip'
+
+                self.service.storage_service.download_remote_file.side_effect = download
+                self.service.storage_service.upload_local_file.side_effect = upload
+                calculator.return_value.calculate_quality_metric.side_effect = calculate
+                publisher.side_effect = RuntimeError('Publish failed') if failure in ['publish', 'failed_publish'] else None
+                if failure in ['publish', 'failed_publish']:
+                    with self.assertRaisesRegex(RuntimeError, 'Publish failed'):
+                        self.service.process_message(self.test_message)
+                else:
+                    self.service.process_message(self.test_message)
+                publisher.assert_called_once()
+                self.assertEqual(publisher.call_args.kwargs['data'].data['success'],
+                                 failure in [None, 'publish'])
+                self.assertGreater(len(paths), 0)
+                self.assertFalse(paths[0].parent.exists())
+                self.assertEqual(list(Path(self.download_root).iterdir()), [neighbor])
+                self.assertEqual(sentinel.read_text(), 'active job')
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_cleanup_failure_does_not_mask_delivery_error_or_retry_delivered_response(self, calculator):
+        publisher = self.service.core.get_topic.return_value.publish
+        for delivery_error in [None, RuntimeError('Publish failed')]:
+            with self.subTest(delivery_error=delivery_error), \
+                    patch('src.services.servicebus_service.shutil.rmtree', side_effect=OSError('Disk unavailable')), \
+                    self.assertLogs('QualityMetricService', level='ERROR') as logs:
+                publisher.side_effect = delivery_error
+                if delivery_error:
+                    with self.assertRaises(RuntimeError) as raised:
+                        self.service.process_message(self.test_message)
+                    self.assertIs(raised.exception, delivery_error)
+                else:
+                    self.service.process_message(self.test_message)
+                self.assertTrue(any('Failed to clean up job files:' in line for line in logs.output))
+
+    def test_invalid_request_does_not_remove_existing_job_files(self):
+        sentinel = Path(self.download_root, 'keep.txt')
+        sentinel.write_text('existing file')
+        self.test_message.data = {'unexpected': 'invalid request'}
+        self.service.process_message(self.test_message)
+        self.assertEqual(sentinel.read_text(), 'existing file')
+        self.service.storage_service.download_remote_file.assert_not_called()
+
+    def test_uncreated_attempt_directory_is_not_removed(self):
+        directory = Path(self.download_root, 'existing-attempt')
+        directory.mkdir()
+        sentinel = directory / 'keep.txt'
+        sentinel.write_text('owned by another attempt')
+        with patch('src.services.servicebus_service.uuid4') as uuid:
+            uuid.return_value.hex = directory.name
+            self.service.process_message(self.test_message)
+        self.assertEqual(sentinel.read_text(), 'owned by another attempt')
+        self.service.storage_service.download_remote_file.assert_not_called()
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_overlapping_redelivery_cleanup_preserves_the_other_attempt(self, calculator):
+        active_paths = []
+
+        def download(url, path):
+            Path(path).write_bytes(b'input')
+
+        def calculate(input_path, algorithms, output_path, subregions_path):
+            active_paths.append(Path(input_path))
+            Path(output_path).write_bytes(b'output')
+            if len(active_paths) == 1:
+                # Nest the duplicate delivery to exercise overlapping lifetimes
+                # deterministically, without thread scheduling dependencies.
+                self.service.process_message(self.test_message)
+                self.assertTrue(Path(input_path).exists())
+                self.assertTrue(Path(output_path).exists())
+                self.assertFalse(active_paths[1].parent.exists())
+
+        self.service.storage_service.download_remote_file.side_effect = download
+        calculator.return_value.calculate_quality_metric.side_effect = calculate
+        self.service.process_message(self.test_message)
+        self.assertEqual(len(active_paths), 2)
+        self.assertNotEqual(active_paths[0].parent, active_paths[1].parent)
+        self.assertEqual(list(Path(self.download_root).iterdir()), [])
+        responses = self.service.core.get_topic.return_value.publish.call_args_list
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(all(call.kwargs['data'].data['success'] for call in responses))
 
     def test_get_directory_path(self):
         url = 'https://example.com/osw/test_upload/df/fff/500mb_file.zip'

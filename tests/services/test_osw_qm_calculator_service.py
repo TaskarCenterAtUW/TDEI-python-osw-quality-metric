@@ -82,6 +82,49 @@ class TestOswQmCalculator(unittest.TestCase):
                 package.assert_not_called()
                 self.assertFalse(os.path.exists(output_path))
 
+    def test_temporary_extraction_and_output_directories_are_cleaned_on_all_exits(self):
+        temporary_directory = tempfile.TemporaryDirectory
+        for stage in ['success', 'extract', 'calculate', 'package']:
+            with self.subTest(stage=stage), temporary_directory() as root:
+                input_path = self.make_input_zip(root)
+                output_path = os.path.join(root, 'output.zip')
+                # Keep objects alive: cleanup must not rely on garbage collection.
+                directories = []
+
+                def create_directory():
+                    directory = temporary_directory(dir=root)
+                    directories.append(directory)
+                    return directory
+
+                def fail_extraction(archive, folder):
+                    Path(folder, 'partial.edges.geojson').write_text('partial')
+                    raise RuntimeError('Extraction failed')
+
+                failed = MagicMock()
+                failed.calculate_quality_metric.return_value = QualityMetricResult(
+                    success=False, message='Calculation failed', output_file='',
+                )
+                with patch('src.services.osw_qm_calculator_service.tempfile.TemporaryDirectory',
+                           side_effect=create_directory), \
+                        patch.object(self.calculator, 'extract_zip', wraps=self.calculator.extract_zip) as extract, \
+                        patch.object(self.calculator, 'get_osw_qm_calculator',
+                                     wraps=self.calculator.get_osw_qm_calculator) as factory, \
+                        patch.object(self.calculator, 'zip_folder', wraps=self.calculator.zip_folder) as package:
+                    if stage == 'extract':
+                        extract.side_effect = fail_extraction
+                    elif stage == 'calculate':
+                        factory.return_value = failed
+                    elif stage == 'package':
+                        package.side_effect = RuntimeError('Packaging failed')
+                    if stage == 'success':
+                        self.calculator.calculate_quality_metric(input_path, ['fixed'], output_path)
+                        self.assertTrue(os.path.isfile(output_path))
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            self.calculator.calculate_quality_metric(input_path, ['fixed'], output_path)
+                self.assertEqual(len(directories), 2)
+                self.assertTrue(all(not os.path.exists(directory.name) for directory in directories))
+
     @patch('src.services.osw_qm_calculator_service.zipfile.ZipFile')
     @patch('src.services.osw_qm_calculator_service.OswQmCalculator.extract_zip')
     def test_calculate_quality_metric_no_edges_file(self, mock_extract_zip, mock_zipfile):

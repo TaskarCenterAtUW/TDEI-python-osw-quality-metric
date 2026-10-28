@@ -118,6 +118,15 @@ responses, and retries can leave additional remote artifacts. Queue retry limits
 and dead-letter handling still apply. The verified Azure worker is
 `python_ms_core` 0.0.26; check the deployed worker's failure/settlement behavior.
 
+Each attempt removes its local input files and output ZIP when the handler exits,
+including download, calculation, upload, and response-delivery failures. Calculator
+extraction/output directories also close explicitly on success and exceptions.
+Cleanup touches only the directory created by that attempt, so overlapping
+redeliveries cannot remove one another's files. A job-directory cleanup error is
+logged without replacing a delivery exception or retrying an already delivered
+response. Process termination can bypass cleanup; this does not sweep files left
+by older runs, the shared OSM cache, or remote artifacts.
+
 # Run the metrics locally
 - Use [test.py](./test.py) to run the metrics on any dataset locally.
 
