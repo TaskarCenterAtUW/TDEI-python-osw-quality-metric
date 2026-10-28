@@ -389,17 +389,24 @@ class QMXNLibCalculator(QMCalculator):
             return QualityMetricResult(success=False, message=f'Error: {e}', output_file="")
 
 
-if __name__ == '__main__':
+def main(argv=None):
+    """Run the CLI and return a process exit code reflecting calculation success."""
     parser = argparse.ArgumentParser(description='Average intersection polygon quality scores onto tiles.')
     parser.add_argument('edges_file')
     parser.add_argument('output_file')
     parser.add_argument('tile_file', nargs='?', help='Optional precomputed intersection tiles.')
     parser.add_argument('--intersection-distance', type=float, default=DEFAULT_INTERSECTION_DISTANCE)
     parser.add_argument('--debug-intersection-polygons', action='store_true')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     calculator = QMXNLibCalculator(
         args.edges_file, args.output_file, args.tile_file,
         intersection_distance=args.intersection_distance,
         debug_intersection_polygons=args.debug_intersection_polygons,
     )
-    print(calculator.calculate_quality_metric())
+    result = calculator.calculate_quality_metric()
+    print(result)
+    return 0 if result.success else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

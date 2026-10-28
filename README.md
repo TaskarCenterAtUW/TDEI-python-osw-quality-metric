@@ -202,6 +202,11 @@ python -m src.calculators.qm_xn_lib_calculator edges.geojson ixn_qm.geojson \
     --debug-intersection-polygons
 ```
 
+The CLI prints the calculation result and exits with code `0` on success or `1`
+on calculation failure. Invalid command-line arguments use argparse's exit code
+`2`. Library callers still receive `QualityMetricResult`. A valid no-road result
+with unavailable (`-1`) scores is a successful calculation and exits with `0`.
+
 An optional third positional argument supplies precomputed tiles. With debug
 enabled, `ixn_qm_intersection_scores.geojson` is saved alongside the final output,
 with `tra_score` plus diagnostic properties `ext:intersection_id`, `ext:degree`,

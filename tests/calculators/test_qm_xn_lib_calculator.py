@@ -1,9 +1,11 @@
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch, MagicMock
 from src.calculators.qm_xn_lib_calculator import (
-    QMXNLibCalculator, SCORING_ALGORITHM_VERSION, fetch_seed_graph, seed_graph_for_tiles,
+    QMXNLibCalculator, SCORING_ALGORITHM_VERSION, fetch_seed_graph, seed_graph_for_tiles, main,
 )
 from src.calculators.intersection_polygons import create_intersection_polygons
 from src.calculators.qm_calculator import QualityMetricResult
@@ -225,34 +227,70 @@ class TestQMXNLibCalculator(unittest.TestCase):
         self.assertIn('--intersection-distance', result.stdout)
         self.assertNotIn('--mode', result.stdout)
 
-    def test_main_without_polygon(self):
-        with tempfile.NamedTemporaryFile(suffix='.geojson') as edges_file, \
-                tempfile.NamedTemporaryFile(suffix='.geojson') as output_file:
-            dummy_geojson = {
-                'type': 'FeatureCollection',
-                'features': []
-            }
-
-            edges_file.write(json.dumps(dummy_geojson).encode())
-            edges_file.flush()
-
+    def test_cli_empty_input_exits_nonzero_without_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            edges_path = os.path.join(folder, 'empty.edges.geojson')
+            output_path = os.path.join(folder, 'scores.geojson')
+            with open(edges_path, 'w') as stream:
+                json.dump({'type': 'FeatureCollection', 'features': []}, stream)
             result = run(
-                [
-                    sys.executable,
-                    '-m',
-                    'src.calculators.qm_xn_lib_calculator',
-                    edges_file.name,
-                    output_file.name,
-                ],
-                stdout=PIPE,
-                stderr=PIPE,
-                text=True,
+                [sys.executable, '-m', 'src.calculators.qm_xn_lib_calculator', edges_path, output_path],
+                stdout=PIPE, stderr=PIPE, text=True, timeout=30,
             )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('success=False', result.stdout)
+            self.assertFalse(os.path.exists(output_path))
 
-            if result.returncode != 0:
-                print('Error:', result.stderr)
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph')
+    def test_cli_success_with_saved_graph_writes_valid_scores(self, fetch):
+        fetch.return_value = ox.load_graphml(os.path.join(INPUTS, 'p13_seed.graphml'))
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            stdout = StringIO()
+            with redirect_stdout(stdout), patch(
+                'requests.sessions.Session.request', side_effect=AssertionError('Unexpected network access'),
+            ):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path,
+                                  '--debug-intersection-polygons'])
+            self.assertEqual(exit_code, 0, stdout.getvalue())
+            self.assertIn('success=True', stdout.getvalue())
+            fetch.assert_called_once()
+            output = gpd.read_file(output_path)
+            self.assertFalse(output.empty)
+            self.assertEqual(output.crs.to_epsg(), 4326)
+            self.assertTrue(output.geometry.is_valid.all())
+            self.assertTrue((output.tra_score.between(0, 1) | (output.tra_score == -1)).all())
+            self.assertTrue((output['ext:intersection_count'] > 0).any())
+            debug = gpd.read_file(os.path.join(folder, 'scores_intersection_scores.geojson'))
+            self.assertFalse(debug.empty)
+            self.assertTrue(debug.tra_score.between(0, 1).all())
 
-            self.assertEqual(result.returncode, 0)
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph',
+           side_effect=RuntimeError('Fairway Mapper unavailable'))
+    def test_cli_fetch_failure_returns_failure_without_output(self, fetch):
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path])
+            self.assertEqual(exit_code, 1)
+            self.assertIn('success=False', stdout.getvalue())
+            self.assertIn('Fairway Mapper unavailable', stdout.getvalue())
+            self.assertFalse(os.path.exists(output_path))
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph', return_value=None)
+    def test_cli_valid_no_road_result_with_supplied_tiles_is_successful(self, fetch):
+        with tempfile.TemporaryDirectory() as folder:
+            output_path = os.path.join(folder, 'scores.geojson')
+            tile_path = os.path.join(INPUTS, 'p13_polygon.geojson')
+            with redirect_stdout(StringIO()):
+                exit_code = main([os.path.join(INPUTS, 'p13_edges.geojson'), output_path, tile_path])
+            self.assertEqual(exit_code, 0)
+            output = gpd.read_file(output_path)
+            self.assertEqual(len(output), len(gpd.read_file(tile_path)))
+            self.assertFalse(output.empty)
+            self.assertTrue((output.tra_score == -1).all())
+            self.assertTrue((output['ext:intersection_count'] == 0).all())
 
     @patch('src.calculators.qm_xn_lib_calculator.nx.Graph')
     def test_graph_from_gdf_multilinestring(self, mock_graph):
