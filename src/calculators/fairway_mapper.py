@@ -3,7 +3,8 @@
 import os
 
 import requests
-from osmnx import _http, _overpass, settings
+from osmnx import settings
+from src.calculators import osmnx_compat
 
 
 INTERPRETER_URL = "https://api.fairwaymapper.com/api/interpreter"
@@ -19,11 +20,9 @@ def download_seed_network(polygon, custom_filter):
     api_key = os.environ.get("FAIRWAY_MAPPER_API_KEY", "").strip()
     if not api_key:
         raise ValueError("FAIRWAY_MAPPER_API_KEY is required for intersection scoring")
-    query_settings = _overpass._make_overpass_settings()
-    for coordinates in _overpass._make_overpass_polygon_coord_strs(polygon):
-        query = f"{query_settings};(way{custom_filter}(poly:{coordinates!r});>;);out;"
+    for query in osmnx_compat.network_queries(polygon, custom_filter):
         cache_key = requests.Request("GET", INTERPRETER_URL, params={"data": query}).prepare().url
-        data = _http._retrieve_from_cache(cache_key)
+        data = osmnx_compat.cached_response(cache_key)
         if data is None:
             response = requests.post(
                 INTERPRETER_URL,
@@ -42,7 +41,7 @@ def download_seed_network(polygon, custom_filter):
             except ValueError:
                 raise ValueError("Fairway Mapper returned invalid JSON") from None
             _validate_response(data)
-            _http._save_to_cache(cache_key, data, True)
+            osmnx_compat.cache_response(cache_key, data)
         else:
             _validate_response(data)
         yield data

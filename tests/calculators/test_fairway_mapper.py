@@ -56,8 +56,9 @@ class TestFairwayMapper(unittest.TestCase):
         self.post.assert_not_called()
 
     def test_each_subdivision_is_requested(self):
-        with patch('src.calculators.fairway_mapper._overpass._make_overpass_polygon_coord_strs',
-                   return_value=['45 -120 46 -120 46 -121', '46 -120 47 -120 47 -121']):
+        with patch('src.calculators.fairway_mapper.osmnx_compat.network_queries',
+                   return_value=['[out:json];way(45,-121,46,-120);out;',
+                                 '[out:json];way(46,-121,47,-120);out;']):
             self.assertEqual(len(self.download()), 2)
         self.assertEqual(self.post.call_count, 2)
 

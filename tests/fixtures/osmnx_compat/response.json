@@ -1,0 +1,110 @@
+{
+  "elements": [
+    {
+      "type": "node",
+      "id": 48719999,
+      "lon": -120.8160817,
+      "lat": 45.8382062
+    },
+    {
+      "type": "node",
+      "id": 1,
+      "lon": -120.8160817,
+      "lat": 45.8392
+    },
+    {
+      "type": "node",
+      "id": 2,
+      "lon": -120.819,
+      "lat": 45.8382062
+    },
+    {
+      "type": "node",
+      "id": 3,
+      "lon": -120.8160817,
+      "lat": 45.8362
+    },
+    {
+      "type": "node",
+      "id": 4,
+      "lon": -120.8160817,
+      "lat": 45.82
+    },
+    {
+      "type": "node",
+      "id": 5,
+      "lon": -120.816,
+      "lat": 45.8372
+    },
+    {
+      "type": "node",
+      "id": 6,
+      "lon": -120.817,
+      "lat": 45.8362
+    },
+    {
+      "type": "node",
+      "id": 7,
+      "lon": -120.815,
+      "lat": 45.8362
+    },
+    {
+      "type": "way",
+      "id": 1,
+      "nodes": [
+        48719999,
+        1
+      ],
+      "tags": {
+        "highway": "residential",
+        "oneway": "yes"
+      }
+    },
+    {
+      "type": "way",
+      "id": 2,
+      "nodes": [
+        48719999,
+        2
+      ],
+      "tags": {
+        "highway": "residential"
+      }
+    },
+    {
+      "type": "way",
+      "id": 3,
+      "nodes": [
+        48719999,
+        5,
+        3
+      ],
+      "tags": {
+        "highway": "residential"
+      }
+    },
+    {
+      "type": "way",
+      "id": 4,
+      "nodes": [
+        3,
+        4
+      ],
+      "tags": {
+        "highway": "residential"
+      }
+    },
+    {
+      "type": "way",
+      "id": 6,
+      "nodes": [
+        6,
+        3,
+        7
+      ],
+      "tags": {
+        "highway": "residential"
+      }
+    }
+  ]
+}

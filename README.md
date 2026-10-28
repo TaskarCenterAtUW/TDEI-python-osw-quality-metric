@@ -143,6 +143,15 @@ or generated. This is a valid no-data result: tiles retain `tra_score=-1` and
 There is no fallback to the public Overpass service. Tile geometries are preserved
 for identical OSM input; a different mirror's data freshness can change results.
 
+OSMnx remains pinned to `2.0.7`. Application calls to its private query, cache,
+and graph-construction helpers are isolated in `src/calculators/osmnx_compat.py`.
+Before upgrading OSMnx, review that adapter and the buffer/simplification/trimming
+sequence, then run `python -m unittest tests.calculators.test_osmnx_compat -v` and
+the full suite (`python -m unittest discover -s tests -v`). The compatibility tests
+use a saved synthetic response to check queries, road direction and geometry,
+tile geometries, and boundary approaches without network access. Review any
+differences before updating the saved baseline; see `tests/fixtures/osmnx_compat/README.md`.
+
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is
 the number of assigned polygons (including any whose scoring failed). Assignment

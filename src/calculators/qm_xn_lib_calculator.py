@@ -1,5 +1,6 @@
 from src.calculators.qm_calculator import QMCalculator, QualityMetricResult
 from src.calculators.fairway_mapper import download_seed_network
+from src.calculators import osmnx_compat
 from src.calculators.intersection_polygons import (
     DEFAULT_INTERSECTION_DISTANCE, DIAGNOSTIC_PROPERTY_NAMES,
     create_intersection_polygons, average_scores_to_tiles,
@@ -24,7 +25,6 @@ import numpy as np
 import pandas as pd
 import os
 import osmnx as ox
-from osmnx.graph import _create_graph
 import time
 from requests.exceptions import ConnectionError, HTTPError, Timeout
 
@@ -39,8 +39,8 @@ def fetch_seed_graph(polygon):
     simplify=True and retain_all=True. Keep its original 500 m buffer trimming
     BEFORE simplification; only the final hull trim retains outside neighbors.
     A strict final trim can then recover the original tile seed graph exactly.
-    Both graphs share one Fairway Mapper download. Recheck the private helpers in
-    this pipeline against graph_from_polygon when upgrading the pinned OSMnx.
+    Both graphs share one Fairway Mapper download. Private helpers are isolated
+    in osmnx_compat; recheck this pipeline against graph_from_polygon on upgrades.
     """
     try:
         if not polygon.is_valid:
@@ -52,7 +52,7 @@ def fetch_seed_graph(polygon):
             projected.buffer(500), crs=crs, to_latlong=True,
         )
         responses = download_seed_network(buffered, SEED_CUSTOM_FILTER)
-        graph = _create_graph(responses, 'all' in ox.settings.bidirectional_network_types)
+        graph = osmnx_compat.graph_from_responses(responses)
         graph = ox.truncate.truncate_graph_polygon(graph, buffered, truncate_by_edge=False)
         graph = ox.simplification.simplify_graph(graph)
         boundary_graph = ox.truncate.truncate_graph_polygon(graph, polygon, truncate_by_edge=True)
