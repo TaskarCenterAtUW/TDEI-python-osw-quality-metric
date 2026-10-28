@@ -486,12 +486,56 @@ class TestIntersectionTiles(unittest.TestCase):
         cells = tiles_for_polygon(self.hull, None, crs="EPSG:32610", fallback=FallbackGrid()).fallback
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "ixn_qm.geojson")
-            result = QMXNLibCalculator(self.edges, out, partition_count=1).calculate_quality_metric()
+            with self.assertLogs('src.calculators.qm_xn_lib_calculator', level='WARNING') as logs:
+                result = QMXNLibCalculator(self.edges, out, partition_count=1).calculate_quality_metric()
             self.assertTrue(result.success, result.message)
             scored = gpd.read_file(out)
         self.assertEqual(len(scored), len(cells))
         self.assertTrue((scored.tra_score == -1).all())
         self.assertTrue((scored['ext:intersection_count'] == 0).all())
+        self.assertIn('generated fallback tiles', logs.output[0])
+        self.assertIn(self.edges, logs.output[0])
+        self.assertIn('tra_score=-1 (unavailable)', logs.output[0])
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph')
+    def test_missing_roads_warn_and_preserve_supplied_tiles(self, fetch):
+        for no_roads in [InsufficientResponseError('No matching roads'), None, nx.MultiDiGraph()]:
+            with self.subTest(no_roads=no_roads), tempfile.TemporaryDirectory() as tmp:
+                fetch.side_effect = no_roads if isinstance(no_roads, Exception) else None
+                fetch.return_value = no_roads
+                tile_path = os.path.join(tmp, 'supplied.geojson')
+                tiles = gpd.GeoDataFrame(geometry=[self.hull], crs=4326)
+                tiles.to_file(tile_path, driver='GeoJSON')
+                output_path = os.path.join(tmp, 'scores.geojson')
+                calculator = QMXNLibCalculator(self.edges, output_path, tile_path, partition_count=1)
+                with self.assertLogs('src.calculators.qm_xn_lib_calculator', level='WARNING') as logs:
+                    result = calculator.calculate_quality_metric()
+                self.assertTrue(result.success, result.message)
+                scored = gpd.read_file(output_path)
+                self.assertEqual(scored.tra_score.tolist(), [-1])
+                self.assertEqual(scored['ext:intersection_count'].tolist(), [0])
+                self.assertTrue(scored.geom_equals_exact(tiles.geometry, tolerance=1e-12).all())
+                self.assertEqual(len(logs.output), 1)
+                self.assertIn('No qualifying OSM roads', logs.output[0])
+                self.assertIn('all supplied tiles', logs.output[0])
+                self.assertIn(self.edges, logs.output[0])
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph_with_retry')
+    def test_fetch_errors_with_supplied_tiles_are_not_reported_as_missing_roads(self, fetch):
+        from requests.exceptions import HTTPError, Timeout
+        for error in [HTTPError('Authentication failed'), Timeout('Retries exhausted'),
+                      ValueError('Fairway Mapper returned an invalid OSM response')]:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as tmp:
+                fetch.side_effect = error
+                tile_path = os.path.join(tmp, 'supplied.geojson')
+                gpd.GeoDataFrame(geometry=[self.hull], crs=4326).to_file(tile_path, driver='GeoJSON')
+                output_path = os.path.join(tmp, 'scores.geojson')
+                calculator = QMXNLibCalculator(self.edges, output_path, tile_path, partition_count=1)
+                with self.assertNoLogs('src.calculators.qm_xn_lib_calculator', level='WARNING'):
+                    result = calculator.calculate_quality_metric()
+                self.assertFalse(result.success)
+                self.assertIn(str(error), result.message)
+                self.assertFalse(os.path.exists(output_path))
 
     def test_a_hull_with_no_road_gets_only_fallback_cells(self):
         calculator = QMXNLibCalculator(self.edges, "unused.geojson")

@@ -135,6 +135,11 @@ are scoped to this provider; old public Overpass cache entries are not reused.
 Transient connection failures and HTTP 429/500/502/503/504 receive up to three
 attempts. Authentication failures, malformed responses, and partial query results
 fail the calculation instead of being treated as an empty road network.
+Supplied tiles still require OSM roads to generate the scoring polygons. If no
+qualifying roads are available under the road/access filter, the calculator logs
+a warning identifying the input dataset and whether the output tiles were supplied
+or generated. This is a valid no-data result: tiles retain `tra_score=-1` and
+`ext:intersection_count=0`, rather than receiving a connectivity score of zero.
 There is no fallback to the public Overpass service. Tile geometries are preserved
 for identical OSM input; a different mirror's data freshness can change results.
 

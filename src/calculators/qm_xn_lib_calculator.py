@@ -284,6 +284,15 @@ class QMXNLibCalculator(QMCalculator):
             except InsufficientResponseError:
                 graph = None
 
+            if graph is None or graph.number_of_edges() == 0:
+                logger.warning(
+                    "No qualifying OSM roads are available for %s under the current road/access filter. "
+                    "Cannot generate intersection scoring polygons; all %s tiles will have "
+                    "tra_score=-1 (unavailable).",
+                    self.edges_file_path,
+                    "supplied" if self.polygon_file_path else "generated fallback",
+                )
+
             if self.polygon_file_path:
                 tile_gdf = gpd.read_file(self.polygon_file_path)
             else:
