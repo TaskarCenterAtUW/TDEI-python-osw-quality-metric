@@ -34,6 +34,11 @@ PARTITION_COUNT=xx # Optional number of partitions to use for dask library. defa
 INTERSECTION_DISTANCE=50 # Optional polygon side distance in meters
 DEBUG_INTERSECTION_POLYGONS=false # Optional intermediate per-polygon score GeoJSON
 FAIRWAY_MAPPER_API_KEY=your_key_here # Required for intersection scoring
+FAIRWAY_CONNECT_TIMEOUT_SECONDS=10 # Optional connection timeout per request
+FAIRWAY_READ_TIMEOUT_SECONDS=180 # Optional read-inactivity timeout and server query timeout
+FAIRWAY_FETCH_BUDGET_SECONDS=600 # Optional shared elapsed-time budget for a graph fetch
+FAIRWAY_MAX_ATTEMPTS=3 # Optional maximum graph-fetch attempts, including the first
+FAIRWAY_RETRY_BACKOFF_SECONDS=10 # Optional initial retry delay; doubles after each failure
 ```
 Note: Replace the endpoints with the actual endpoints of the environment you want to run the service in
 
@@ -133,7 +138,7 @@ library or CLI. The key is sent only in the Authorization header. The road/acces
 filter, query subdivision, and graph processing remain the same. Cached queries
 are scoped to this provider; old public Overpass cache entries are not reused.
 Transient connection failures and HTTP 429/500/502/503/504 receive up to three
-attempts. Authentication failures, malformed responses, and partial query results
+attempts by default. Authentication failures, malformed responses, and partial query results
 fail the calculation instead of being treated as an empty road network.
 Supplied tiles still require OSM roads to generate the scoring polygons. If no
 qualifying roads are available under the road/access filter, the calculator logs
@@ -151,6 +156,32 @@ the full suite (`python -m unittest discover -s tests -v`). The compatibility te
 use a saved synthetic response to check queries, road direction and geometry,
 tile geometries, and boundary approaches without network access. Review any
 differences before updating the saved baseline; see `tests/fixtures/osmnx_compat/README.md`.
+
+Fetch timing is configured through the `FAIRWAY_*` variables above for both
+library and service use. Each graph fetch shares one monotonic time budget
+(600 seconds by default) across query subdivisions, graph processing, and retries.
+Requests use connection/read timeouts capped by the remaining budget. Retry delays
+default to 10 and 20 seconds; a valid `Retry-After` header can increase them. If a
+delay cannot fit in the remaining budget, the calculation fails without sleeping
+or retrying early. Invalid timing settings also fail the calculation.
+
+The fetch budget is cooperative: it is checked before and after blocking operations,
+not enforced by killing a running request. Requests' read timeout measures inactivity,
+not total response duration; DNS, streaming responses, or graph processing can overrun
+the budget before the next check. It is not a whole-job deadline: scoring, storage,
+and message publishing take additional time. Completed over-budget fetches are rejected.
+
+Retry warnings report the next attempt, delay, elapsed time, and remaining budget.
+Fetch summaries and total message-processing durations use the INFO log level;
+enable INFO for `src.calculators.qm_xn_lib_calculator` to see fetch summaries.
+Listener startup logs
+the installed queue library version, `MAX_CONCURRENT_MESSAGES`, `PARTITION_COUNT`,
+and the lock-renewal limit reported by the queue client (or `unreported`). The
+locally verified `python_ms_core` 0.0.26 registers messages with `AutoLockRenewer`
+for up to 86,400 seconds; this change does not alter lock renewal. Verify the
+deployed queue version, renewal-failure logs, and total job durations before
+increasing concurrency. Increasing concurrency also increases simultaneous API
+requests and scoring workers; keep it within provider quotas and available memory.
 
 The final GeoJSON keeps one feature per tile in EPSG:4326. `tra_score` is the
 arithmetic mean of valid assigned polygon scores, and `ext:intersection_count` is

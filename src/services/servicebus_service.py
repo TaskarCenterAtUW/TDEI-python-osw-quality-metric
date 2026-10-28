@@ -14,6 +14,7 @@ from src.models.quality_request import QualityRequest
 from src.models.quality_response import QualityMetricResponse, ResponseData
 from src.services.osw_qm_calculator_service import OswQmCalculator
 import threading
+from importlib.metadata import version
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("QualityMetricService")
@@ -47,6 +48,14 @@ class ServiceBusService:
     #     process_thread.start()
 
     def start_listening(self):
+        renewal = getattr(self.incoming_topic, 'max_renewal_duration', None)
+        renewal = renewal if isinstance(renewal, (int, float)) else 'unreported'
+        logger.info(
+            'Queue worker timing: python_ms_core=%s max_concurrent_messages=%s '
+            'partition_count=%s reported_lock_renewal_limit_seconds=%s',
+            version('python_ms_core'), self.config.max_concurrent_messages,
+            self.config.partition_count, renewal,
+        )
         self.incoming_topic.subscribe(
             self.config.incoming_topic_subscription,
             self.process_message,
@@ -57,6 +66,8 @@ class ServiceBusService:
             self._stop_server_and_container(delay_seconds=5)
 
     def process_message(self, msg: QueueMessage):
+        started = time.monotonic()
+        outcome = 'failed'
         logger.info(f"Processing message {msg}")
         input_file_url = None
         try:
@@ -113,6 +124,7 @@ class ServiceBusService:
                 data=  response_data
             )
             self.send_response(response)
+            outcome = 'success'
             # Process the message
             # Clean up the download_folder
         except Exception as e:
@@ -130,6 +142,9 @@ class ServiceBusService:
                 data=  response_data
             )
             self.send_response(response)
+        finally:
+            logger.info('Message processing finished: message_id=%s status=%s elapsed_seconds=%.3f',
+                        msg.messageId, outcome, time.monotonic() - started)
 
     def send_response(self, msg: QueueMessage):
         try:

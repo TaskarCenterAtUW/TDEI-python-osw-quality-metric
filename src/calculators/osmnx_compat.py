@@ -10,9 +10,15 @@ from osmnx import _http, _overpass, settings
 from osmnx.graph import _create_graph
 
 
-def network_queries(polygon, custom_filter):
+def network_queries(polygon, custom_filter, *, timeout=None):
     """Build network queries with OSMnx's settings and polygon subdivision."""
-    query_settings = _overpass._make_overpass_settings()
+    if timeout is None:
+        query_settings = _overpass._make_overpass_settings()
+    else:
+        # Format request-local settings without mutating OSMnx globals shared
+        # by concurrent message handlers.
+        maxsize = '' if settings.overpass_memory is None else f'[maxsize:{settings.overpass_memory}]'
+        query_settings = settings.overpass_settings.format(timeout=int(timeout), maxsize=maxsize)
     for coordinates in _overpass._make_overpass_polygon_coord_strs(polygon):
         yield f"{query_settings};(way{custom_filter}(poly:{coordinates!r});>;);out;"
 

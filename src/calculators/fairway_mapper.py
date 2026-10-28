@@ -3,14 +3,14 @@
 import os
 
 import requests
-from osmnx import settings
 from src.calculators import osmnx_compat
+from src.calculators.fetch_timing import FetchBudget
 
 
 INTERPRETER_URL = "https://api.fairwaymapper.com/api/interpreter"
 
 
-def download_seed_network(polygon, custom_filter):
+def download_seed_network(polygon, custom_filter, *, budget=None):
     """Keep OSMnx query subdivision and caching, with request-local credentials.
 
     The cache key includes the provider and query, never the API key. Do not
@@ -20,7 +20,10 @@ def download_seed_network(polygon, custom_filter):
     api_key = os.environ.get("FAIRWAY_MAPPER_API_KEY", "").strip()
     if not api_key:
         raise ValueError("FAIRWAY_MAPPER_API_KEY is required for intersection scoring")
-    for query in osmnx_compat.network_queries(polygon, custom_filter):
+    budget = budget if budget is not None else FetchBudget()
+    budget.remaining()
+    for query in osmnx_compat.network_queries(polygon, custom_filter, timeout=budget.policy.read_timeout):
+        budget.remaining()
         cache_key = requests.Request("GET", INTERPRETER_URL, params={"data": query}).prepare().url
         data = osmnx_compat.cached_response(cache_key)
         if data is None:
@@ -28,9 +31,10 @@ def download_seed_network(polygon, custom_filter):
                 INTERPRETER_URL,
                 data={"data": query},
                 headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
-                timeout=(10, settings.requests_timeout),
+                timeout=budget.request_timeouts(),
                 allow_redirects=False,
             )
+            budget.remaining()
             # Do not include response bodies or credentials in exceptions/logs.
             if response.status_code != 200:
                 raise requests.HTTPError(
@@ -41,9 +45,11 @@ def download_seed_network(polygon, custom_filter):
             except ValueError:
                 raise ValueError("Fairway Mapper returned invalid JSON") from None
             _validate_response(data)
+            budget.remaining()
             osmnx_compat.cache_response(cache_key, data)
         else:
             _validate_response(data)
+        budget.remaining()
         yield data
 
 

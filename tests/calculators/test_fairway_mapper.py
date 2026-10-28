@@ -11,6 +11,7 @@ from shapely import box
 
 from src.calculators.fairway_mapper import INTERPRETER_URL, download_seed_network
 from src.calculators.qm_xn_lib_calculator import fetch_seed_graph_with_retry
+from src.calculators.fetch_timing import FetchBudget, FetchBudgetExceeded, FetchPolicy
 
 
 class TestFairwayMapper(unittest.TestCase):
@@ -61,6 +62,31 @@ class TestFairwayMapper(unittest.TestCase):
                                  '[out:json];way(46,-121,47,-120);out;']):
             self.assertEqual(len(self.download()), 2)
         self.assertEqual(self.post.call_count, 2)
+
+    @patch('src.calculators.fetch_timing.time.monotonic', return_value=0)
+    def test_subdivisions_share_budget_and_late_response_is_not_cached(self, clock):
+        budget = FetchBudget(FetchPolicy(budget_seconds=10))
+
+        def respond(*args, **kwargs):
+            clock.return_value += 6
+            return Mock(status_code=200, json=Mock(return_value={'elements': []}))
+
+        self.post.side_effect = respond
+        with patch('src.calculators.fairway_mapper.osmnx_compat.network_queries',
+                   return_value=['query-one', 'query-two', 'query-three']):
+            with self.assertRaises(FetchBudgetExceeded):
+                list(download_seed_network(self.hull, SEED_CUSTOM_FILTER, budget=budget))
+        self.assertEqual(self.post.call_count, 2)
+        self.assertEqual([call.kwargs['timeout'] for call in self.post.call_args_list], [(5, 5), (2, 2)])
+        self.assertEqual(len(list(Path(self.cache).glob('*.json'))), 1)
+
+    def test_request_and_server_timeouts_are_local_to_fetch(self):
+        original = settings.requests_timeout
+        budget = FetchBudget(FetchPolicy(connect_timeout=2, read_timeout=25))
+        list(download_seed_network(self.hull, SEED_CUSTOM_FILTER, budget=budget))
+        self.assertEqual(self.post.call_args.kwargs['timeout'], (2, 25))
+        self.assertIn('[timeout:25]', self.post.call_args.kwargs['data']['data'])
+        self.assertEqual(settings.requests_timeout, original)
 
     def test_http_errors_and_redirects_do_not_cache_or_expose_body(self):
         for status in [301, 401, 403, 429, 500, 502, 503, 504]:

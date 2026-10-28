@@ -13,6 +13,10 @@ class TestServiceBusService(unittest.TestCase):
     @patch('src.services.servicebus_service.Config')
     @patch('src.services.servicebus_service.Core')
     def setUp(self, mock_core, mock_config):
+        # Listener behavior is invoked explicitly in these unit tests. Avoid
+        # background threads observing a later test's reinitialized singleton.
+        self.enterContext(patch.object(ServiceBusService, '_instance', None))
+        self.enterContext(patch('src.services.servicebus_service.threading.Thread.start'))
         # Mock Config
         mock_config.return_value.connection_string = 'mock-connection-string'
         mock_config.return_value.incoming_topic_name = 'mock-incoming-topic'
@@ -136,6 +140,31 @@ class TestServiceBusService(unittest.TestCase):
 
         # Assertions
         mock_logger.error.assert_called_with('Error processing message message-id-from-msg : Download failed')
+
+    @patch('src.services.servicebus_service.OswQmCalculator')
+    def test_processing_duration_is_logged_on_success_and_failure(self, calculator):
+        for error in [None, RuntimeError('Calculation failed')]:
+            with self.subTest(error=error):
+                calculator.return_value.calculate_quality_metric.side_effect = error
+                with patch('src.services.servicebus_service.time.monotonic', side_effect=[10, 14]), \
+                        patch('src.services.servicebus_service.logger') as logger, \
+                        patch.object(self.service, 'send_response'):
+                    self.service.process_message(self.test_message)
+                logger.info.assert_any_call(
+                    'Message processing finished: message_id=%s status=%s elapsed_seconds=%.3f',
+                    self.test_message.messageId, 'failed' if error else 'success', 4,
+                )
+
+    def test_listener_logs_reported_lock_renewal_and_concurrency(self):
+        self.service.incoming_topic.max_renewal_duration = 86400
+        self.service.config.partition_count = 2
+        with patch('src.services.servicebus_service.logger') as logger:
+            self.service.start_listening()
+        logger.info.assert_any_call(
+            'Queue worker timing: python_ms_core=%s max_concurrent_messages=%s '
+            'partition_count=%s reported_lock_renewal_limit_seconds=%s',
+            unittest.mock.ANY, 5, 2, 86400,
+        )
 
     @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph',
            side_effect=RuntimeError('Fairway Mapper unavailable'))
