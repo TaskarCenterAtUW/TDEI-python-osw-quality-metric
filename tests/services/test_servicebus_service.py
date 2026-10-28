@@ -1,4 +1,7 @@
 import unittest
+import os
+import tempfile
+import zipfile
 from unittest.mock import patch, MagicMock
 from src.services.servicebus_service import ServiceBusService
 from src.models.quality_request import RequestData, QualityRequest
@@ -133,6 +136,39 @@ class TestServiceBusService(unittest.TestCase):
 
         # Assertions
         mock_logger.error.assert_called_with('Error processing message message-id-from-msg : Download failed')
+
+    @patch('src.calculators.qm_xn_lib_calculator.fetch_seed_graph',
+           side_effect=RuntimeError('Fairway Mapper unavailable'))
+    def test_calculator_failure_sends_failed_response_without_upload(self, fetch):
+        self.test_message.data['algorithm'] = 'ixn'
+        self.service.config.partition_count = 1
+        self.service.config.intersection_distance = 50.0
+        self.service.config.debug_intersection_polygons = False
+        edges = os.path.join(os.path.dirname(__file__), '..', 'xnqm', 'inputs', 'p13_edges.geojson')
+
+        def download(url, path):
+            with zipfile.ZipFile(path, 'w') as archive:
+                archive.write(edges, 'test.edges.geojson')
+
+        self.service.storage_service.download_remote_file.side_effect = download
+        with tempfile.TemporaryDirectory() as folder:
+            self.service.config.get_download_folder.return_value = folder
+            with patch.object(self.service, 'send_response') as send:
+                # Exercise the real calculator and packaging wrapper; mock only
+                # the network failure and external storage/message transport.
+                self.service.process_message(self.test_message)
+            fetch.assert_called_once()
+            self.service.storage_service.upload_local_file.assert_not_called()
+            send.assert_called_once()
+            response = send.call_args.args[0]
+            self.assertEqual(response.data.status, 'failed')
+            self.assertFalse(response.data.success)
+            self.assertIsNone(response.data.qm_dataset_url)
+            self.assertIn('Fairway Mapper unavailable', response.data.message)
+            self.assertEqual(response.messageId, self.test_message.messageId)
+            self.assertFalse(os.path.exists(os.path.join(
+                folder, self.test_message.messageId, 'qm', 'qm-output.zip',
+            )))
 
     @patch('src.services.servicebus_service.QueueMessage')
     @patch('src.services.servicebus_service.logger')

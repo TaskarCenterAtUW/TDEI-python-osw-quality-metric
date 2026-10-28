@@ -51,6 +51,9 @@ class OswQmCalculator:
             ixn_file (str): The path to the sub-regions polygon file.
         Returns:
             None
+        Raises:
+            RuntimeError: A calculator reports failure or does not produce a
+                nonempty output file. No output ZIP is created in these cases.
 
         """
         try:
@@ -72,7 +75,13 @@ class OswQmCalculator:
                 qm_edges_output_path = os.path.join(output_unzip_folder.name, f'{algorithm_name}_qm.geojson')
                 qm_calculator = self.get_osw_qm_calculator(algorithm_name, ixn_file, edges_file_path, qm_edges_output_path)
                 start_time = time.time()
-                qm_calculator.calculate_quality_metric()
+                result = qm_calculator.calculate_quality_metric()
+                if not result.success:
+                    raise RuntimeError(f"Quality metric '{algorithm_name}' failed: {result.message}")
+                if not os.path.isfile(qm_edges_output_path) or os.path.getsize(qm_edges_output_path) == 0:
+                    raise RuntimeError(
+                        f"Quality metric '{algorithm_name}' reported success but its output file is missing or empty"
+                    )
                 end_time = time.time()
                 logger.info(f"Time taken to calculate quality metrics for {algorithm_name}: {end_time - start_time} seconds")
             # Copy the rest of the files from input to output

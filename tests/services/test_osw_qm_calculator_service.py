@@ -1,9 +1,11 @@
 import tempfile
 import os
 import zipfile
+import json
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
 from src.calculators import QMXNLibCalculator, QMFixedCalculator
+from src.calculators.qm_calculator import QualityMetricResult
 from src.services.osw_qm_calculator_service import OswQmCalculator
 
 
@@ -15,23 +17,66 @@ class TestOswQmCalculator(unittest.TestCase):
     def test_initialization(self):
         self.assertEqual(self.calculator.cores_to_use, 4)
 
-    @patch('src.services.osw_qm_calculator_service.zipfile.ZipFile')
-    @patch('src.services.osw_qm_calculator_service.OswQmCalculator.extract_zip')
-    @patch('src.services.osw_qm_calculator_service.OswQmCalculator.get_osw_qm_calculator')
-    @patch('src.services.osw_qm_calculator_service.OswQmCalculator.zip_folder')
-    def test_calculate_quality_metric(self, mock_zip_folder, mock_get_calculator, mock_extract_zip, mock_zipfile):
-        mock_extract_zip.return_value = ['mock_path/edges_file.geojson']
-        mock_calculator = MagicMock()
-        mock_get_calculator.return_value = mock_calculator
+    def make_input_zip(self, folder):
+        path = os.path.join(folder, 'input.zip')
+        edges = os.path.join(os.path.dirname(__file__), '..', 'xnqm', 'inputs', 'p13_edges.geojson')
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.write(edges, 'test.edges.geojson')
+        return path
 
-        with tempfile.NamedTemporaryFile() as temp_input, tempfile.NamedTemporaryFile() as temp_output:
-            self.calculator.calculate_quality_metric(temp_input.name, ['fixed'], temp_output.name)
+    def test_calculate_quality_metric(self):
+        with tempfile.TemporaryDirectory() as folder:
+            input_path = self.make_input_zip(folder)
+            output_path = os.path.join(folder, 'output.zip')
+            self.calculator.calculate_quality_metric(input_path, ['fixed'], output_path)
+            with zipfile.ZipFile(output_path) as archive:
+                self.assertEqual(archive.namelist(), ['fixed_qm.geojson'])
+                output = json.loads(archive.read('fixed_qm.geojson'))
+                self.assertGreater(len(output['features']), 0)
+                self.assertIn('fixed_score', output['features'][0]['properties'])
 
-        mock_zipfile.assert_called_once()
-        mock_extract_zip.assert_called_once()
-        mock_get_calculator.assert_called_once_with('fixed', None, 'mock_path/edges_file.geojson', unittest.mock.ANY)
-        mock_calculator.calculate_quality_metric.assert_called_once()
-        mock_zip_folder.assert_called_once()
+    def test_failed_calculator_prevents_packaging_partial_results(self):
+        with tempfile.TemporaryDirectory() as folder:
+            input_path = self.make_input_zip(folder)
+            output_path = os.path.join(folder, 'output.zip')
+            original_factory = self.calculator.get_osw_qm_calculator
+            failed = MagicMock()
+            failed.calculate_quality_metric.return_value = QualityMetricResult(
+                success=False, message='Fairway Mapper unavailable', output_file='',
+            )
+
+            def factory(algorithm, *args):
+                return failed if algorithm == 'ixn' else original_factory(algorithm, *args)
+
+            with patch.object(self.calculator, 'get_osw_qm_calculator', side_effect=factory), \
+                    patch.object(self.calculator, 'zip_folder') as package:
+                with self.assertRaisesRegex(RuntimeError, "Quality metric 'ixn' failed: Fairway Mapper unavailable"):
+                    self.calculator.calculate_quality_metric(input_path, ['fixed', 'ixn'], output_path)
+            package.assert_not_called()
+            self.assertFalse(os.path.exists(output_path))
+
+    def test_success_without_output_prevents_packaging(self):
+        for empty_file in [False, True]:
+            with self.subTest(empty_file=empty_file), tempfile.TemporaryDirectory() as folder:
+                input_path = self.make_input_zip(folder)
+                output_path = os.path.join(folder, 'output.zip')
+
+                def factory(algorithm, ixn_file, edges_file, expected_output):
+                    if empty_file:
+                        with open(expected_output, 'w'):
+                            pass
+                    calculator = MagicMock()
+                    calculator.calculate_quality_metric.return_value = QualityMetricResult(
+                        success=True, message='success', output_file=expected_output,
+                    )
+                    return calculator
+
+                with patch.object(self.calculator, 'get_osw_qm_calculator', side_effect=factory), \
+                        patch.object(self.calculator, 'zip_folder') as package:
+                    with self.assertRaisesRegex(RuntimeError, 'output file is missing or empty'):
+                        self.calculator.calculate_quality_metric(input_path, ['ixn'], output_path)
+                package.assert_not_called()
+                self.assertFalse(os.path.exists(output_path))
 
     @patch('src.services.osw_qm_calculator_service.zipfile.ZipFile')
     @patch('src.services.osw_qm_calculator_service.OswQmCalculator.extract_zip')
