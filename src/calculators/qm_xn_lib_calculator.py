@@ -253,8 +253,12 @@ class QMXNLibCalculator(QMCalculator):
         return stats
     
     def get_measures_from_polygon(self, polygon, gdf, side_roles=None):
-        # A multipart tile scores its largest part: one tile stays one output
-        # row, and tile_tra_score walks one exterior ring.
+        """Score connectivity within an intersection polygon.
+
+        The scoring pipeline supplies single Polygons. For compatibility with
+        direct callers, a MultiPolygon scores only its largest component.
+        Any supplied side_roles must describe that component's exterior ring.
+        """
         if isinstance(polygon, MultiPolygon):
             polygon = max(polygon.geoms, key=lambda part: part.area)
         # crop gdf to the polygon

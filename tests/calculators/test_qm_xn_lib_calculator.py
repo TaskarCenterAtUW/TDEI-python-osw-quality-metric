@@ -555,11 +555,11 @@ class TestIntersectionTiles(unittest.TestCase):
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
         self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.0)
 
-    def test_a_multipart_tile_is_scored_on_its_largest_part(self):
+    def test_direct_multipolygon_call_scores_largest_part(self):
         calculator = QMXNLibCalculator("unused.geojson", "unused.geojson")
-        tile = MultiPolygon([box(200, 0, 210, 10), box(0, 0, 100, 100)])
+        polygon = MultiPolygon([box(200, 0, 210, 10), box(0, 0, 100, 100)])
         edges = gpd.GeoDataFrame(geometry=[LineString([(-10, 50), (110, 50)])], crs="EPSG:32610")
-        self.assertEqual(calculator.get_measures_from_polygon(tile, edges)["tra_score"], 0.1)
+        self.assertEqual(calculator.get_measures_from_polygon(polygon, edges)["tra_score"], 0.1)
 
     @patch("src.calculators.qm_xn_lib_calculator.fetch_seed_graph")
     def test_debug_polygon_scores_are_optional_and_average_back_to_output(self, fetch):
