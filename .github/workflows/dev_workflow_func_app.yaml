@@ -17,6 +17,7 @@
 #   - APP_SETTINGS_JSON    – JSON object of extra app settings to apply; default '{}'
 #
 ######### Dev Workflow  ########
+name: Deploy to Dev (Function App)
 on:
   pull_request:
     branches: [dev]
