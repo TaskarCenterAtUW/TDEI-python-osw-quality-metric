@@ -17,6 +17,7 @@
 #   - APP_SETTINGS_JSON    – JSON object of extra app settings to apply; default '{}'
 #
 ######### Prod Workflow  ########
+name: Deploy to Prod (Function App)
 on:
   pull_request:
     branches: [main]
