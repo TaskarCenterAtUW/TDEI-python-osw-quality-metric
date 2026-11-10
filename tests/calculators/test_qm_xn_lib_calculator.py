@@ -674,5 +674,47 @@ class TestIntersectionTiles(unittest.TestCase):
         self.assertAlmostEqual(tiles.area.sum(), tiles.union_all().area, delta=1e-6 * bound.area)
 
 
+class TestScoringWorkers(unittest.TestCase):
+    """How score_intersections splits the polygons and how many processes it asks dask for."""
+
+    def _score(self, polygon_count, **calculator_kwargs):
+        polygons = gpd.GeoDataFrame(
+            {'side_roles': ['approach,approach,approach,approach'] * polygon_count},
+            geometry=[box(0, 0, 1, 1)] * polygon_count, crs='EPSG:32610',
+        )
+        with patch('src.calculators.qm_xn_lib_calculator.dask_geopandas.from_geopandas') as from_geopandas:
+            QMXNLibCalculator('unused', 'unused', **calculator_kwargs).score_intersections(
+                polygons, gpd.GeoDataFrame(geometry=[], crs='EPSG:32610'),
+            )
+        compute = from_geopandas.return_value.apply.return_value.compute
+        compute.assert_called_once()
+        return from_geopandas.call_args.kwargs['npartitions'], compute.call_args.kwargs
+
+    @patch.dict(os.environ, {'DEFAULT_CPU': '4'})
+    def test_one_partition_and_one_process_per_cpu_by_default(self):
+        partitions, compute = self._score(100)
+        self.assertEqual(partitions, 4)
+        self.assertEqual(compute, {'scheduler': 'multiprocessing', 'num_workers': 4, 'chunksize': 1})
+
+    @patch.dict(os.environ, {'DEFAULT_CPU': '4'})
+    def test_more_partitions_than_cpus_still_use_one_process_per_cpu(self):
+        partitions, compute = self._score(100, partition_count=16)
+        self.assertEqual(partitions, 16)
+        self.assertEqual(compute['num_workers'], 4)
+
+    @patch.dict(os.environ, {'DEFAULT_CPU': '4'})
+    def test_never_more_processes_than_partitions(self):
+        for kwargs, polygon_count, expected in [({'partition_count': 2}, 100, 2), ({}, 3, 3)]:
+            with self.subTest(kwargs=kwargs, polygon_count=polygon_count):
+                partitions, compute = self._score(polygon_count, **kwargs)
+                self.assertEqual(partitions, expected)
+                self.assertEqual(compute['num_workers'], expected)
+
+    def test_each_partition_goes_to_its_own_process(self):
+        # dask's default chunksize (6) batches up to 6 ready partitions into one process
+        _, compute = self._score(100, partition_count=2)
+        self.assertEqual(compute['chunksize'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
