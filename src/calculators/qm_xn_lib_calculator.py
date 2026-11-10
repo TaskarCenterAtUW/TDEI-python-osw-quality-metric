@@ -264,9 +264,13 @@ class QMXNLibCalculator(QMCalculator):
         """
         if isinstance(polygon, MultiPolygon):
             polygon = max(polygon.geoms, key=lambda part: part.area)
-        # crop gdf to the polygon
-        cropped_gdf = gpd.clip(gdf, polygon)
-        
+        # Clip only the edges the spatial index finds touching the polygon. gpd.clip on
+        # the whole frame computes the frame's total bounds on every call, which made
+        # each polygon cost O(all edges): 66 ms on NYC's 2.8M edges, against 4.5 ms this
+        # way, with identical scores.
+        candidates = gdf.iloc[gdf.sindex.query(polygon, predicate="intersects")]
+        cropped_gdf = gpd.clip(candidates, polygon)
+
         G = self.graph_from_gdf(cropped_gdf)
         stats = self.get_stats(polygon, G, cropped_gdf, side_roles)
         return stats
@@ -315,6 +319,10 @@ class QMXNLibCalculator(QMCalculator):
         # One process per CPU the container was given (available_cpus), but no more
         # processes than there are partitions to run.
         workers = min(partitions, available_cpus())
+        # Scoring reads only the edges' geometry. Every partition is sent its own pickled
+        # copy of this frame and graph_from_gdf copies each clipped row's attributes onto
+        # the graph, so dropping the other columns saves memory and time per worker.
+        edges_gdf = edges_gdf[[edges_gdf.geometry.name]]
         df_dask = dask_geopandas.from_geopandas(intersection_gdf, npartitions=partitions)
         # chunksize=1 sends each partition to its own process. dask's multiprocessing
         # scheduler otherwise hands ready tasks to one worker in batches of up to 6

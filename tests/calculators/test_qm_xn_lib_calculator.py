@@ -454,8 +454,10 @@ class TestQMXNLibCalculator(unittest.TestCase):
         # Call the function
         result = self.calculator.get_measures_from_polygon(multipolygon, mock_gdf)
 
-        # Assertions
-        mock_clip.assert_called_once_with(mock_gdf, single_polygon)  # Ensure the single polygon was used
+        # Assertions: the single polygon was used, both to find candidate edges and to clip them
+        mock_gdf.sindex.query.assert_called_once_with(single_polygon, predicate="intersects")
+        candidates = mock_gdf.iloc[mock_gdf.sindex.query.return_value]
+        mock_clip.assert_called_once_with(candidates, single_polygon)
         mock_graph_from_gdf.assert_called_once_with(mock_clipped_gdf)
         mock_get_stats.assert_called_once_with(single_polygon, mock_graph, mock_clipped_gdf, None)
         self.assertEqual(result, mock_stats)
@@ -714,6 +716,72 @@ class TestScoringWorkers(unittest.TestCase):
         # dask's default chunksize (6) batches up to 6 ready partitions into one process
         _, compute = self._score(100, partition_count=2)
         self.assertEqual(compute['chunksize'], 1)
+
+    def test_workers_get_the_edges_geometry_only(self):
+        polygons = gpd.GeoDataFrame(
+            {'side_roles': ['approach,approach,approach,approach']},
+            geometry=[box(0, 0, 1, 1)], crs='EPSG:32610',
+        )
+        edges = gpd.GeoDataFrame(
+            {'highway': ['footway'], 'width': [2.0]},
+            geometry=[LineString([(0, 0), (1, 1)])], crs='EPSG:32610',
+        )
+        with patch('src.calculators.qm_xn_lib_calculator.dask_geopandas.from_geopandas') as from_geopandas:
+            QMXNLibCalculator('unused', 'unused').score_intersections(polygons, edges)
+        sent = from_geopandas.return_value.apply.call_args.kwargs['gdf']
+        self.assertEqual(list(sent.columns), ['geometry'])
+        self.assertEqual(list(edges.columns), ['highway', 'width', 'geometry'])  # caller's frame untouched
+
+
+class TestClipCandidates(unittest.TestCase):
+    """get_measures_from_polygon clips only the spatial-index matches, with unchanged scores."""
+
+    SIDES = 'approach,approach,approach,approach'
+
+    def setUp(self):
+        self.calculator = QMXNLibCalculator('unused', 'unused')
+        self.polygon = box(-10, -10, 10, 10)
+        # A crossroads through the polygon whose west arm is broken off at the centre, so not
+        # every pair of sides connects, plus edges far away that the index rules out.
+        self.edges = gpd.GeoDataFrame(
+            {'highway': ['footway'] * 6},
+            geometry=[
+                LineString([(0, 0), (20, 0)]),
+                LineString([(0, 0), (0, 20)]),
+                LineString([(0, 0), (0, -20)]),
+                LineString([(-1, 0), (-20, 0)]),
+                LineString([(1000, 1000), (1020, 1000)]),
+                LineString([(-500, 300), (-500, 320)]),
+            ],
+            crs='EPSG:32610',
+        )
+
+    def _whole_frame_stats(self, edges):
+        # what the calculator computed before: gpd.clip on the whole frame
+        cropped = gpd.clip(edges, self.polygon)
+        graph = self.calculator.graph_from_gdf(cropped)
+        return self.calculator.get_stats(self.polygon, graph, cropped, self.SIDES)
+
+    def test_scores_match_clipping_the_whole_frame(self):
+        stats = self.calculator.get_measures_from_polygon(self.polygon, self.edges, self.SIDES)
+        self.assertEqual(stats, self._whole_frame_stats(self.edges))
+        # 4 sides give 10 pairs (with repeats). East, north and south reach each other (3);
+        # the west arm reaches none, and a side crossed at one point doesn't pair with itself.
+        self.assertEqual(stats['total_edges'], 10)
+        self.assertEqual(stats['connect_edges'], 3)
+
+    def test_only_index_matches_are_clipped(self):
+        with patch('src.calculators.qm_xn_lib_calculator.gpd.clip', wraps=gpd.clip) as clip:
+            self.calculator.get_measures_from_polygon(self.polygon, self.edges, self.SIDES)
+        clipped = clip.call_args.args[0]
+        self.assertEqual(sorted(clipped.index), [0, 1, 2, 3])
+
+    def test_geometry_only_edges_score_the_same(self):
+        with_attributes = self.calculator.get_measures_from_polygon(self.polygon, self.edges, self.SIDES)
+        geometry_only = self.calculator.get_measures_from_polygon(
+            self.polygon, self.edges[['geometry']], self.SIDES,
+        )
+        self.assertEqual(geometry_only, with_attributes)
 
 
 if __name__ == '__main__':
