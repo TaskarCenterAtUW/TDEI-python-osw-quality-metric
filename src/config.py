@@ -1,7 +1,9 @@
 import os
 from dotenv import load_dotenv
+from pydantic import Field
 from pydantic_settings import BaseSettings
 from src.calculators import QMFixedCalculator, QMXNLibCalculator
+from src.calculators.cpus import available_cpus
 
 load_dotenv()
 
@@ -14,7 +16,9 @@ class Config(BaseSettings):
     storage_container_name: str = os.environ.get('CONTAINER_NAME', 'osw')
     algorithm_dictionary: dict = {"fixed": QMFixedCalculator, "ixn": QMXNLibCalculator}
     max_concurrent_messages: int = os.environ.get('MAX_CONCURRENT_MESSAGES', 1)
-    partition_count: int = os.environ.get('PARTITION_COUNT', 2)
+    # How many pieces intersection scoring is split into. PARTITION_COUNT overrides it;
+    # otherwise one per CPU (DEFAULT_CPU, else the OS count), so every CPU gets work.
+    partition_count: int = Field(default_factory=available_cpus)
     intersection_distance: float = os.environ.get('INTERSECTION_DISTANCE', 50.0)
     debug_intersection_polygons: bool = os.environ.get('DEBUG_INTERSECTION_POLYGONS', 'false')
     max_receivable_messages : int = os.environ.get('MAX_RECEIVABLE_MESSAGES', -1)
