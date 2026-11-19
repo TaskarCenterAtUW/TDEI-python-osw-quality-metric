@@ -17,6 +17,7 @@
 #   - APP_SETTINGS_JSON    – JSON object of extra app settings to apply; default '{}'
 #
 ######### Stage Workflow  ########
+name: Deploy to Stage (Function App)
 on:
   pull_request:
     branches: [stage]

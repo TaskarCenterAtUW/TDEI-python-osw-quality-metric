@@ -1,7 +1,12 @@
+import os
 import unittest
 from unittest.mock import patch
 from src.config import Config
 from src.calculators import QMFixedCalculator, QMXNLibCalculator
+
+
+def _env_without(*names):
+    return {k: v for k, v in os.environ.items() if k not in names}
 
 
 class TestConfig(unittest.TestCase):
@@ -14,9 +19,22 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(config.outgoing_topic_name, '')
         self.assertEqual(config.storage_container_name, 'osw')
         self.assertEqual(config.max_concurrent_messages, 1)
-        self.assertEqual(config.partition_count, 2)
         self.assertEqual(config.intersection_distance, 50.0)
         self.assertFalse(config.debug_intersection_polygons)
+
+    @patch.dict('os.environ', {'DEFAULT_CPU': '4'})
+    def test_partition_count_defaults_to_default_cpu(self):
+        with patch.dict('os.environ', _env_without('PARTITION_COUNT'), clear=True):
+            self.assertEqual(Config().partition_count, 4)
+
+    def test_partition_count_falls_back_to_the_os_cpu_count(self):
+        with patch.dict('os.environ', _env_without('PARTITION_COUNT', 'DEFAULT_CPU'), clear=True), \
+                patch('src.calculators.cpus.os.cpu_count', return_value=3):
+            self.assertEqual(Config().partition_count, 3)
+
+    @patch.dict('os.environ', {'DEFAULT_CPU': '4', 'PARTITION_COUNT': '16'})
+    def test_partition_count_overrides_default_cpu(self):
+        self.assertEqual(Config().partition_count, 16)
 
     def test_algorithm_dictionary(self):
         config = Config()
